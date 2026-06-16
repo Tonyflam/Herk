@@ -163,3 +163,35 @@ class CMCClient:
             q = params.get("query", "")
             return f"{X402_DEX_SEARCH}?query={q}"
         raise ValueError(f"unknown x402 kind: {kind}")
+
+    @staticmethod
+    def parse_quote_price(data: Any, symbol: str) -> float | None:
+        """Best-effort USD price for ``symbol`` from a quotes payload.
+
+        Handles the v2 (dict-per-symbol) and v3 (list-per-symbol) shapes and the
+        optional top-level ``data`` envelope, with a case-insensitive symbol
+        match. Returns ``None`` on anything unexpected so the caller falls back
+        to its own reference price — this never raises into the trade loop.
+        """
+        try:
+            root = data.get("data", data) if isinstance(data, dict) else data
+            if not isinstance(root, dict):
+                return None
+            entry = root.get(symbol)
+            if entry is None:
+                for k, v in root.items():
+                    if str(k).upper() == symbol.upper():
+                        entry = v
+                        break
+            if isinstance(entry, list):
+                entry = entry[0] if entry else None
+            if not isinstance(entry, dict):
+                return None
+            usd = entry.get("quote", {}).get("USD", {})
+            price = usd.get("price") if isinstance(usd, dict) else None
+            if price is None:
+                return None
+            price = float(price)
+            return price if price > 0 else None
+        except Exception:
+            return None

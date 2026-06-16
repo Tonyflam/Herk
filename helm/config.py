@@ -197,6 +197,10 @@ class Secrets:
     bnb_agent_network: str = "bsc-testnet"
     x402_max_payment_wei: int = 20_000_000_000_000_000
     x402_enabled: bool = True
+    # Hard cap on PAID x402 data calls per UTC day. On a small book each call
+    # (~$0.01 USDT on BSC) is a real cost, so this bounds the drag while still
+    # exercising native x402 in the live trade loop. 0 disables paid x402.
+    x402_max_calls_per_day: int = 6
     execute_trades: bool = False
     execute_chain: bool = False
 
@@ -333,6 +337,7 @@ def _load_secrets() -> Secrets:
         bnb_agent_network=os.getenv("BNB_AGENT_NETWORK", "bsc-testnet"),
         x402_max_payment_wei=int(os.getenv("X402_MAX_PAYMENT_WEI", "20000000000000000")),
         x402_enabled=_env_bool("X402_ENABLED", True),
+        x402_max_calls_per_day=int(os.getenv("X402_MAX_CALLS_PER_DAY", "6")),
         execute_trades=_env_bool("HELM_EXECUTE_TRADES", False),
         execute_chain=_env_bool("HELM_EXECUTE_CHAIN", False),
     )

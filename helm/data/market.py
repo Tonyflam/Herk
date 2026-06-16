@@ -167,3 +167,13 @@ class MarketData:
             self._client.close()
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ x402
+    def cmc_x402_url(self, kind: str, **params: Any) -> str:
+        """Build a CMC x402 endpoint URL (payment is made by the TWAK adapter)."""
+        return self._cmc.x402_url_for(kind, **params)
+
+    @staticmethod
+    def parse_cmc_price(data: Any, symbol: str) -> float | None:
+        """Best-effort USD price from a CMC quotes payload (None on miss)."""
+        return CMCClient.parse_quote_price(data, symbol)

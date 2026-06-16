@@ -75,6 +75,9 @@ class Agent:
         self.portfolio = self._load_state() or Portfolio.new(
             self.settings.capital.initial_paper_equity_usd
         )
+        # Native x402 budget tracking (paid CMC data calls per UTC day).
+        self._x402_day: date | None = None
+        self._x402_calls = 0
 
     # --------------------------------------------------------- adapter pick
     def _make_executor(self) -> ExecutionAdapter:
@@ -237,7 +240,7 @@ class Agent:
 
         self._run_exits(prices, actions, dry_run)
         if not posture.halt_new_risk and not self.sentinel.kill_switch_engaged():
-            self._run_entries(snap, prices, posture, actions, dry_run)
+            self._run_entries(snap, prices, posture, actions, dry_run, now)
         self._ensure_min_trade(now, snap, prices, posture, actions, dry_run)
 
         summary = self.portfolio.summary(prices)
@@ -288,8 +291,64 @@ class Agent:
             actions.append(Action("exit", ex.symbol,
                                   f"{ex.reason} @ {fill.price:.4f} pnl {realized:+.2f}"))
 
+    # ----------------------------------------------------------------- x402
+    def _x402_ready(self) -> bool:
+        """True only when a real, paid x402 data call should be attempted.
+
+        Gated on live mode + the x402-on-buys policy + an executor that can pay
+        (TWAK). In paper / backtest / dry-run this is always False, so the
+        simulated book is never charged and parity with live is preserved.
+        """
+        s = self.settings
+        return (
+            s.is_live
+            and s.execution.x402_on_buys
+            and s.secrets.x402_enabled
+            and hasattr(self.executor, "x402_request")
+        )
+
+    def _x402_prebuy(self, symbol: str, ref_price: float, now: datetime) -> float:
+        """Pay-per-call (x402) for a fresh CMC quote right before a live buy.
+
+        This is native x402 in the trade loop: the agent pays USDT on BSC for the
+        market data that confirms its entry price. The call is hard-capped per UTC
+        day (``x402_max_calls_per_day``) and per payment (``x402_max_payment_wei``)
+        so the cost stays negligible on a small book, and any failure or budget
+        exhaustion falls straight back to ``ref_price``. Never raises into the loop.
+
+        Returns the execution price: the fresher x402 price when it parses within
+        a sane band of the reference, else ``ref_price`` unchanged.
+        """
+        d = now.date()
+        if self._x402_day != d:
+            self._x402_day, self._x402_calls = d, 0
+        if self._x402_calls >= max(0, self.settings.secrets.x402_max_calls_per_day):
+            return ref_price
+        try:
+            url = self.market.cmc_x402_url("quotes", symbol=symbol)
+            res = self.executor.x402_request(url)
+        except Exception as e:  # payment plumbing must never break the trade loop
+            self.ledger.append("x402", {"symbol": symbol, "ok": False,
+                                        "note": f"{type(e).__name__}: {str(e)[:60]}"})
+            return ref_price
+        self._x402_calls += 1
+        ok = bool(getattr(res, "ok", False))
+        note = (getattr(res, "note", "") or "")[:80]
+        fresh = self.market.parse_cmc_price(getattr(res, "data", None), symbol) if ok else None
+        # Trust a fresh price only within +/-20% of our reference (guards against a
+        # misparsed field ever moving the order to a nonsense level).
+        use_price, used_fresh = ref_price, False
+        if fresh is not None and ref_price > 0 and abs(fresh - ref_price) / ref_price <= 0.20:
+            use_price, used_fresh = fresh, True
+        self.ledger.append("x402", {
+            "symbol": symbol, "ok": ok, "paid_call": self._x402_calls,
+            "fresh_price": round(fresh, 6) if fresh else None,
+            "used_fresh": used_fresh, "note": note,
+        })
+        return use_price
+
     # -------------------------------------------------------------- entries
-    def _run_entries(self, snap: SignalSnapshot, prices, posture, actions, dry_run) -> None:
+    def _run_entries(self, snap: SignalSnapshot, prices, posture, actions, dry_run, now) -> None:
         s = self.settings
         equity = self.portfolio.equity(prices)
         gross_cap_usd = posture.max_gross_pct * equity
@@ -341,7 +400,12 @@ class Agent:
                                       f"would buy ${plan.notional_usd:.2f} ({plan.binding_constraint})"))
                 consumed += plan.notional_usd
                 continue
-            order = Order(sig.symbol, "buy", ref_price=sig.price,
+            # Native x402: pay-per-call for a fresh CMC quote that confirms the
+            # entry price (live only, hard-capped; falls back to sig.price).
+            exec_price = sig.price
+            if self._x402_ready():
+                exec_price = self._x402_prebuy(sig.symbol, sig.price, now)
+            order = Order(sig.symbol, "buy", ref_price=exec_price,
                           notional_usd=plan.notional_usd, liquidity_usd=sig.liquidity_usd,
                           reason="entry")
             fill = self.executor.execute(order)
