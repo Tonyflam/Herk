@@ -259,6 +259,7 @@ def run(
     stride: int = 6,
     end_ms: int | None = None,
     regime_overlay: bool = False,
+    contest_clock: bool = False,
     history: dict[str, list[Row]] | None = None,
     btc: list[Row] | None = None,
     verbose: bool = True,
@@ -294,6 +295,15 @@ def run(
     universe = list(history.keys())
     start = min(warmup, max(0, len(clock) - 10))
     breached = False
+
+    # Opt-in (`--contest-clock`): align the meta-controller's contest clock to the
+    # replay window so the time-based postures (build → mid → endgame, protect_lead
+    # / catch_up and the endgame risk escalation) are exercised on historical data.
+    # Default OFF keeps the build-phase baseline that isolates the core engine; the
+    # fixed 2026 contest dates would otherwise pin every replayed bar to 'build'.
+    if contest_clock:
+        meta.start = datetime.fromtimestamp(clock[start] / 1000, tz=timezone.utc)
+        meta.end = datetime.fromtimestamp(clock[-1] / 1000, tz=timezone.utc)
 
     for k in range(start, len(clock), stride):
         ts = clock[k]
@@ -412,13 +422,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--end", type=str, default=None, help="window end date YYYY-MM-DD (default: latest)")
     ap.add_argument("--regime-overlay", action="store_true",
                     help="replay the live F&G de-risking overlay via a no-lookahead proxy (default: neutral)")
+    ap.add_argument("--contest-clock", action="store_true",
+                    help="align the meta-controller clock to the window so endgame postures "
+                         "(protect_lead / catch_up escalation) are exercised (default: build baseline)")
     args = ap.parse_args(argv)
     end_ms = None
     if args.end:
         end_ms = int(datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc).timestamp() * 1000)
     try:
         run(days=args.days, top_n=args.top, warmup=args.warmup, stride=args.stride,
-            end_ms=end_ms, regime_overlay=args.regime_overlay, verbose=True)
+            end_ms=end_ms, regime_overlay=args.regime_overlay,
+            contest_clock=args.contest_clock, verbose=True)
         return 0
     except Exception as e:
         print(f"backtest failed: {type(e).__name__}: {e}")

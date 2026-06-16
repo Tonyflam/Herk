@@ -429,7 +429,8 @@ def cmd_backtest(args) -> int:
     try:
         run(settings, days=args.days, top_n=args.top, warmup=args.warmup,
             stride=args.stride, end_ms=end_ms,
-            regime_overlay=getattr(args, "regime_overlay", False), verbose=True)
+            regime_overlay=getattr(args, "regime_overlay", False),
+            contest_clock=getattr(args, "contest_clock", False), verbose=True)
     except Exception as e:
         console.print(f"[red]backtest failed:[/red] {type(e).__name__}: {e}")
         return 1
@@ -600,6 +601,8 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--end", type=str, default=None, help="window end date YYYY-MM-DD (default: latest)")
     pb.add_argument("--regime-overlay", action="store_true",
                     help="replay the F&G de-risking overlay via a no-lookahead proxy")
+    pb.add_argument("--contest-clock", action="store_true",
+                    help="exercise the endgame postures (protect_lead / catch_up escalation) over the window")
     pb.set_defaults(func=cmd_backtest)
 
     prt = sub.add_parser("routes", help="pre-validate token routes + liquidity before going live")

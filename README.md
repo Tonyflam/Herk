@@ -304,6 +304,22 @@ HELM_PROFILE=aggressive python -m helm.cli backtest                     # latest
 HELM_PROFILE=aggressive python -m helm.cli backtest --days 7 --end 2024-11-12  # 1-week
 ```
 
+By default the backtest runs the **build** posture (isolating the core
+signal+sizing+survival engine). The time-based contest tactics — `protect_lead`
+when ahead late, and the codified **endgame catch-up escalation** when behind
+late — are pinned to the live June-2026 window, so they're exercised on demand
+with `--contest-clock`, which aligns the meta-controller's clock to the replay
+window:
+
+```bash
+HELM_PROFILE=aggressive python -m helm.cli backtest --contest-clock   # exercise endgame postures
+```
+
+Validated on the latest 33-day window: the catch-up posture engages in the final
+fifth, the convex drawdown taper keeps per-trade risk bounded (escalation can
+never push through the halt line), and the run still survives well under the 30%
+DQ gate.
+
 Results are written to [backtest/results.json](backtest/results.json).
 
 > Methodology note: public OHLCV, no survivorship-free dataset. The curated
