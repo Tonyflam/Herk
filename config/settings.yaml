@@ -1,0 +1,162 @@
+# ============================================================================
+# HELM — strategy & risk configuration
+# Safe defaults: PAPER mode, survival-first risk. Tune freely.
+# ============================================================================
+
+mode: paper                     # paper | live  (env can override via HELM_MODE)
+
+# Active risk profile. Survival-first `balanced` is the safe default (paper, CI,
+# demos). The live CONTEST runs `aggressive` — calibrated to the prize's actual
+# objective: PURE total return, DQ only at 30% drawdown. Flip via HELM_PROFILE.
+#   balanced   — capital-preservation posture (the field's default; cedes the race)
+#   aggressive — deploy hard into concentrated momentum; 30% DQ is the binding cap
+#   max        — endgame catch-up posture; hottest, ~2% DQ margin (use deliberately)
+profile: balanced
+
+capital:
+  base_currency: USDT           # cash leg; BNB held only for gas (BNB not in eligible list)
+  initial_paper_equity_usd: 100 # starting equity for paper simulation
+
+# ---------------------------------------------------------------------------
+# CONTEST — the live tournament window and its scoring constraints.
+# HELM optimizes for PLACEMENT under a bust-out constraint (poker-ICM logic),
+# not raw chart PnL. This block feeds the Contest Meta-Controller (the edge).
+# ---------------------------------------------------------------------------
+contest:
+  enabled: true
+  start_utc: "2026-06-22T12:00:00Z"
+  end_utc:   "2026-06-28T12:00:00Z"
+  max_drawdown_pct: 30.0        # official DQ gate — breaching = disqualified
+  halt_drawdown_pct: 22.0       # HELM's OWN halt, set BELOW the gate (safety margin)
+  min_trades_per_day: 1         # DQ if a UTC day has zero trades
+  dust_floor_usd: 1.0           # any hour starting <= this is scored 0% — never get drained to dust
+  # Meta-controller posture switches
+  build_phase_frac: 0.35        # first 35% of window = build a base carefully
+  endgame_phase_frac: 0.80      # last 20% of window = lock posture by rank
+  protect_lead_return_pct: 20.0 # cumulative return >= this -> PROTECT (minimize variance, just meet min-trade)
+  catchup_behind_return_pct: 2.0  # if late & under this return -> allow BOUNDED extra variance (never breach halt)
+
+# ---------------------------------------------------------------------------
+# RISK — deterministic Sentinel limits. Enforced in code, never by the LLM.
+# ---------------------------------------------------------------------------
+risk:
+  target_portfolio_vol_annual: 0.45  # vol-targeting: scale book to constant annualized vol
+  max_gross_exposure: 0.90           # max fraction of equity deployed (remainder sits in stable)
+  max_position_pct: 0.20             # hard cap per single position
+  max_open_positions: 5
+  daily_loss_limit_pct: 8.0          # pause NEW entries once daily loss exceeds this
+  per_trade_risk_pct: 1.5            # capital risked per trade (stop-distance sized)
+  stop_loss_atr_mult: 2.5
+  take_profit_atr_mult: 4.0
+  trailing_stop: true
+  slippage_bps_max: 150              # reject a fill if quoted slippage exceeds this
+  min_liquidity_usd: 250000          # skip tokens below this 24h volume (honeypot/illiquidity guard)
+  fee_bps_roundtrip: 60              # simulated round-trip cost used by the edge gate
+
+# ---------------------------------------------------------------------------
+# SIGNALS — cross-sectional momentum / relative strength + vol.
+# ---------------------------------------------------------------------------
+signals:
+  lookbacks_hours: [6, 24, 72, 168]      # multi-horizon momentum
+  momentum_weights: [0.15, 0.35, 0.30, 0.20]
+  min_composite_score: 0.15              # conviction floor — only act above this
+  net_of_cost_gate: true                 # only size when expected edge clears round-trip cost
+  rebalance_interval_min: 60             # decision cadence (minutes)
+  top_n: 3                               # hold the top-N ranked eligible names
+
+# ---------------------------------------------------------------------------
+# REGIME — global risk throttle (the survival valve).
+# ---------------------------------------------------------------------------
+regime:
+  fear_greed_risk_off: 25                # <= -> defensive (cut gross, prefer stable)
+  fear_greed_risk_on: 78                 # >= -> euphoric, fade / trim aggression
+  btc_dominance_trend_lookback_h: 72
+  use_derivatives_funding: true          # funding/OI from CMC derivatives metrics
+  risk_off_gross_scale: 0.35             # multiply gross exposure by this when risk-off
+
+# ---------------------------------------------------------------------------
+# DATA — provider priority with honest fallback chain.
+# ---------------------------------------------------------------------------
+data:
+  provider_priority: [twak_x402, cmc_mcp, cmc_rest, public]
+  cache_ttl_sec: 45
+  candles_source: public                 # public klines for OHLCV history (labeled in UI)
+
+# ---------------------------------------------------------------------------
+# UNIVERSE — eligible set is fixed (149 BEP-20). We TRADE a curated liquid
+# subset by default (survival-first on small capital; avoids dust/honeypots).
+# ---------------------------------------------------------------------------
+universe:
+  use_curated_tradeable: true            # trade liquid majors subset, not all 149
+  extra_tradeable: []                    # add eligible symbols to widen the book
+  exclude: []                            # force-exclude symbols
+
+execution:
+  adapter: paper                         # paper | twak
+  dex: pancakeswap
+  chain_id: 56
+  x402_on_buys: true                     # pay ~$0.01 for fresh DEX data before each buy
+  quote_only_dry_run: true               # in dry-run, request live quotes but never broadcast
+
+identity:
+  register_erc8004: false                # set true to register on-chain agent identity
+  network: bsc-testnet
+
+dashboard:
+  host: 127.0.0.1
+  port: 8600
+
+# ===========================================================================
+# PROFILES — named overrides layered onto the blocks above at load time.
+# The base config (above) IS the `balanced` profile. `aggressive` retunes the
+# risk/regime knobs for a one-week, return-ranked, bust-out-constrained sprint:
+# stay deployed through fear, concentrate in the top momentum names, and let the
+# 30% DQ gate (not an over-cautious 22%) be the binding constraint. Every
+# deterministic guardrail (kill-switch, Sentinel pre-trade checks, hash-chained
+# ledger, convex drawdown taper, DQ halt) stays fully enforced in BOTH profiles —
+# only the dials move. Select with `profile:` above or HELM_PROFILE=aggressive.
+# ===========================================================================
+profiles:
+
+  # Capital-preservation posture. Empty = use the survival-first base as-is.
+  balanced: {}
+
+  # Contest posture: maximize expected total return inside the DQ constraint.
+  aggressive:
+    contest:
+      halt_drawdown_pct: 26.0        # use the DQ runway; keep a 4-pt margin to 30
+      protect_lead_return_pct: 28.0  # don't turn defensive early in a 1-week sprint
+      catchup_behind_return_pct: 4.0 # widen the catch-up trigger band
+    risk:
+      target_portfolio_vol_annual: 0.85   # a return race rewards vol, not suppresses it
+      max_gross_exposure: 0.97            # near-fully deployed
+      max_position_pct: 0.33              # 3 names ≈ 99% — genuine concentration
+      daily_loss_limit_pct: 14.0          # don't freeze on a normal red day mid-sprint
+      per_trade_risk_pct: 3.0             # double the conviction per entry
+      take_profit_atr_mult: 6.0           # let winners run further before trimming
+    signals:
+      min_composite_score: 0.10           # act on slightly thinner edge to stay invested
+      top_n: 3                            # concentrated, but diversified enough to survive
+    regime:
+      risk_off_gross_scale: 0.62          # stay ~60%+ deployed even in fear (vs 35%)
+
+  # Endgame catch-up posture: hottest dial, ~2-pt DQ margin. Deliberate use only —
+  # the meta-controller's convex drawdown taper still cuts exposure before the gate.
+  max:
+    contest:
+      halt_drawdown_pct: 28.0
+      protect_lead_return_pct: 35.0
+      catchup_behind_return_pct: 6.0
+    risk:
+      target_portfolio_vol_annual: 1.20
+      max_gross_exposure: 0.99
+      max_position_pct: 0.50              # 2 names
+      daily_loss_limit_pct: 20.0
+      per_trade_risk_pct: 5.0
+      take_profit_atr_mult: 8.0
+    signals:
+      min_composite_score: 0.06
+      top_n: 2
+    regime:
+      risk_off_gross_scale: 0.80
+

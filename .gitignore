@@ -1,0 +1,36 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Secrets & local state (NEVER commit) ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+wallet.json
+keystore/
+.twak/
+.bnbagent/
+secrets/
+
+# --- Runtime data / ledgers / caches ---
+data/runtime/
+*.sqlite
+*.db
+*.log
+.cache/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

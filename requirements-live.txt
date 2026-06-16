@@ -1,0 +1,8 @@
+# HELM — live / on-chain extras. Install only when going on-chain:
+#   pip install -r requirements-live.txt
+#
+# (Core paper-mode runtime stays dependency-light; see requirements.txt.)
+
+bnbagent>=0.3.6        # BNB AI Agent SDK — ERC-8004 identity + X402Signer (EIP-712 local signing)
+web3>=6.15             # BSC RPC reads (verify registration, balances, tx receipts)
+eth-account>=0.11      # local key handling for x402 signing fallbacks

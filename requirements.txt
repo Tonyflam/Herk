@@ -1,0 +1,19 @@
+# HELM — core runtime (works fully in PAPER mode with zero credentials)
+httpx>=0.27
+pandas>=2.2
+numpy>=1.26
+PyYAML>=6.0
+python-dotenv>=1.0
+rich>=13.7
+tenacity>=8.2
+
+# Dashboard / demo
+fastapi>=0.110
+uvicorn[standard]>=0.29
+jinja2>=3.1
+
+# --- Optional / live-only (install when going on-chain) ---
+# Installed via:  pip install -r requirements-live.txt
+#   bnbagent>=0.3.6      # BNB AI Agent SDK (ERC-8004 identity, X402Signer)
+#   web3>=6.15           # BSC RPC interactions / verification
+#   eth-account>=0.11    # local signing / x402 on Base

@@ -1,0 +1,15 @@
+{
+  "days": 33.2917,
+  "bars": 800,
+  "initial_equity": 100.0,
+  "final_equity": 106.8977,
+  "total_return_pct": 6.8977,
+  "max_drawdown_pct": 12.062,
+  "sharpe_annual": 1.6222,
+  "n_trades": 114,
+  "win_rate_pct": 45.4545,
+  "fees_paid": 4.903,
+  "btc_buyhold_pct": 19.9026,
+  "excess_vs_btc_pct": -13.005,
+  "breached_halt": false
+}

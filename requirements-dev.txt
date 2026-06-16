@@ -1,0 +1,2 @@
+# Dev / test dependencies (not needed to run the agent)
+pytest>=8.0
