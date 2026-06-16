@@ -30,6 +30,10 @@ contest:
   halt_drawdown_pct: 22.0       # HELM's OWN halt, set BELOW the gate (safety margin)
   min_trades_per_day: 1         # DQ if a UTC day has zero trades
   dust_floor_usd: 1.0           # any hour starting <= this is scored 0% — never get drained to dust
+  # Daily-floor guarantee: force the >=1-trade/day ping from this UTC hour (NOT
+  # 23:59) so a transient failure still leaves hourly retry buffer before midnight.
+  min_trade_deadline_hour: 18
+  min_trade_retry_attempts: 3
   # Meta-controller posture switches
   build_phase_frac: 0.35        # first 35% of window = build a base carefully
   endgame_phase_frac: 0.80      # last 20% of window = lock posture by rank
@@ -110,6 +114,7 @@ execution:
   chain_id: 56
   x402_on_buys: true                     # pay ~$0.01 for fresh DEX data before each buy
   quote_only_dry_run: true               # in dry-run, request live quotes but never broadcast
+  bsc_rpc_urls: []                        # redundant BSC RPC failover; empty = built-in public defaults
 
 identity:
   register_erc8004: false                # set true to register on-chain agent identity

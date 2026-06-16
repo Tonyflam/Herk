@@ -43,6 +43,12 @@ class ContestCfg:
     halt_drawdown_pct: float = 22.0
     min_trades_per_day: int = 1
     dust_floor_usd: float = 1.0
+    # Daily-floor guarantee: from this UTC hour onward HELM will force the
+    # >=1-trade/day compliance ping if nothing else has traded that day. Set
+    # early (default 18:00, not 23:59) so a transient failure leaves several
+    # hourly cycles of retry buffer before the midnight DQ deadline.
+    min_trade_deadline_hour: int = 18
+    min_trade_retry_attempts: int = 3
     build_phase_frac: float = 0.35
     endgame_phase_frac: float = 0.80
     protect_lead_return_pct: float = 20.0
@@ -119,6 +125,10 @@ class ExecutionCfg:
     chain_id: int = 56
     x402_on_buys: bool = True
     quote_only_dry_run: bool = True
+    # Redundant BSC RPC endpoints (failover order). Empty = use the built-in
+    # public defaults in helm/data/rpc.py. A single RPC going down must never
+    # blind the agent during the live week.
+    bsc_rpc_urls: list[str] = field(default_factory=list)
 
 
 @dataclass

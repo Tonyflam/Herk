@@ -123,6 +123,19 @@ class Agent:
         tmp.write_text(json.dumps(d, indent=2, default=str))
         tmp.replace(self.state_path)
 
+    def reload_state(self) -> bool:
+        """Re-read the last committed state from disk, discarding any partial
+        in-memory mutation from a step that raised mid-cycle. Used by the
+        supervised run loop to recover cleanly after a transient failure. State
+        is only persisted at the *end* of a successful step, so the on-disk copy
+        is always the last good checkpoint. Returns True if a state was loaded.
+        """
+        restored = self._load_state()
+        if restored is not None:
+            self.portfolio = restored
+            return True
+        return False
+
     def _save_snapshot(self, snap: SignalSnapshot, posture: ContestPosture) -> None:
         """Write a rich, human-readable snapshot for the public dashboard.
 
@@ -338,13 +351,18 @@ class Agent:
             return
         if self.sentinel.kill_switch_engaged():
             return
-        # Only nudge late in the UTC day, and only if nothing else traded.
-        if now.hour < 20:
+        # Guarantee the floor early in the UTC day (default 18:00, not 23:59) so a
+        # transient failure still leaves several hourly cycles of retry buffer
+        # before the midnight disqualification deadline.
+        if now.hour < s.contest.min_trade_deadline_hour:
             return
         # Smallest compliant maintenance trade in the most liquid eligible name.
         pool = snap.ranked or sorted(snap.signals, key=lambda x: x.liquidity_usd, reverse=True)
         cand = next((x for x in pool if x.price > 0 and x.liquidity_usd >= s.risk.min_liquidity_usd), None)
         if not cand:
+            self.ledger.append("alert", {"reason": "min_daily_trade",
+                                         "detail": "no eligible candidate (will retry next cycle)"})
+            actions.append(Action("blocked", "—", "daily-floor: no eligible candidate"))
             return
         notional = max(s.contest.dust_floor_usd * 2, 0.0)
         if dry_run:
@@ -352,7 +370,15 @@ class Agent:
             return
         order = Order(cand.symbol, "buy", ref_price=cand.price, notional_usd=notional,
                       liquidity_usd=cand.liquidity_usd, reason="min_daily_trade")
-        fill = self.executor.execute(order)
+        # Retry the compliance ping — missing the >=1-trade/day floor is an instant
+        # DQ, so a transient executor/RPC error must never let it slip silently.
+        fill, err = self._execute_with_retry(order, s.contest.min_trade_retry_attempts)
+        if fill is None:
+            self.ledger.append("alert", {"reason": "min_daily_trade", "symbol": cand.symbol,
+                                         "detail": f"all attempts failed: {err}"})
+            actions.append(Action("blocked", cand.symbol,
+                                  f"daily-floor ping FAILED ({err}) — retry next cycle"))
+            return
         # Tight protective stop so the compliance ping carries minimal risk.
         stop = cand.price - (cand.atr * s.risk.stop_loss_atr_mult if cand.atr > 0 else cand.price * 0.06)
         tp = cand.price + (cand.atr * s.risk.take_profit_atr_mult if cand.atr > 0 else cand.price * 0.1)
@@ -360,6 +386,24 @@ class Agent:
                                  cand.atr * s.risk.stop_loss_atr_mult if cand.atr > 0 else cand.price * 0.06)
         self.ledger.append("trade", {**asdict(fill), "reason": "min_daily_trade"})
         actions.append(Action("compliance", cand.symbol, f"daily-floor ping ${fill.notional_usd:.2f}"))
+
+    def _execute_with_retry(self, order, attempts: int):
+        """Execute an order, retrying on exception or a non-filled result.
+
+        Returns ``(fill, None)`` on success, or ``(None, last_error)`` if every
+        attempt fails. Used for the contest-critical daily-floor ping so a
+        transient live error cannot cost the >=1-trade/day floor.
+        """
+        last_err = "unknown"
+        for _ in range(max(1, int(attempts))):
+            try:
+                fill = self.executor.execute(order)
+                if fill is not None and fill.notional_usd > 0 and fill.price > 0:
+                    return fill, None
+                last_err = "no fill"
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
+        return None, last_err
 
     # ----------------------------------------------------------------- loops
     def close(self) -> None:

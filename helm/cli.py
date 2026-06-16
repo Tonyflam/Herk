@@ -28,9 +28,26 @@ from .config import load_settings
 
 console = Console()
 
+# Supervisor: abort a supervised run only after this many *consecutive* failed
+# cycles (a single transient data/RPC/exec error must never kill the live week).
+_MAX_CONSEC_FAILURES = 6
+
 
 def _fmt_pct(x: float) -> str:
     return f"{x:+.2f}%"
+
+
+def _parse_until(raw: str | None):
+    """Parse an ISO-8601 deadline for ``run --until``; assume UTC if naive."""
+    if not raw:
+        return None
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+    except ValueError:
+        console.print(f"[yellow]could not parse --until {raw!r}; ignoring[/yellow]")
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def cmd_signal(args) -> int:
@@ -46,24 +63,81 @@ def cmd_signal(args) -> int:
 
 
 def cmd_run(args) -> int:
+    from datetime import datetime, timezone
+
     from .agent import Agent
 
     agent = Agent()
     dry = bool(args.dry_run)
-    cycles = max(1, int(args.cycles))
     interval = max(0, int(args.interval))
+    cycles = max(1, int(args.cycles))
+    until = _parse_until(getattr(args, "until", None))
+    supervise = bool(getattr(args, "supervise", False)) or until is not None
     mode = "DRY-RUN" if dry else ("LIVE" if agent.settings.is_live else "PAPER")
-    console.print(f"[bold]HELM[/bold] starting · mode=[cyan]{mode}[/cyan] · "
-                  f"profile=[yellow]{agent.settings.profile}[/yellow] · "
-                  f"cycles={cycles} · interval={interval}s")
+
+    if until is not None:
+        if interval == 0:
+            interval = 3600  # default to hourly when running to a deadline
+        console.print(f"[bold]HELM[/bold] supervised run · mode=[cyan]{mode}[/cyan] · "
+                      f"profile=[yellow]{agent.settings.profile}[/yellow] · "
+                      f"until=[cyan]{until.isoformat()}[/cyan] · interval={interval}s")
+    else:
+        console.print(f"[bold]HELM[/bold] starting · mode=[cyan]{mode}[/cyan] · "
+                      f"profile=[yellow]{agent.settings.profile}[/yellow] · "
+                      f"cycles={cycles} · interval={interval}s"
+                      + ("  ·  [magenta]supervised[/magenta]" if supervise else ""))
+
+    consec_fail = 0
+    completed = 0
+    i = 0
     try:
-        for i in range(cycles):
-            report = agent.step(dry_run=dry)
-            _print_report(report, title=f"HELM — cycle {i + 1}/{cycles} ({mode})")
-            if i < cycles - 1 and interval > 0:
+        while True:
+            if until is not None:
+                if datetime.now(timezone.utc) >= until:
+                    break
+            elif i >= cycles:
+                break
+
+            label = (f"HELM — cycle {i + 1} ({mode})" if until is not None
+                     else f"HELM — cycle {i + 1}/{cycles} ({mode})")
+            try:
+                report = agent.step(dry_run=dry)
+                _print_report(report, title=label)
+                consec_fail = 0
+                completed += 1
+            except KeyboardInterrupt:
+                console.print("[yellow]interrupted — exiting cleanly[/yellow]")
+                break
+            except Exception as e:
+                if not supervise:
+                    raise
+                consec_fail += 1
+                detail = f"{type(e).__name__}: {e}"
+                try:
+                    agent.ledger.append("alert", {"reason": "step_failure",
+                                                  "consecutive": consec_fail,
+                                                  "detail": detail[:200]})
+                except Exception:
+                    pass
+                # Discard any partial in-memory mutation; resume from last checkpoint.
+                agent.reload_state()
+                console.print(f"[red]cycle {i + 1} failed[/red] ({detail[:120]}) — "
+                              f"recovered from checkpoint "
+                              f"[{consec_fail}/{_MAX_CONSEC_FAILURES}]")
+                if consec_fail >= _MAX_CONSEC_FAILURES:
+                    console.print(Panel(
+                        f"[red]aborting[/red] · {consec_fail} consecutive failures — "
+                        "something is systemically broken", title="supervisor"))
+                    return 1
+
+            i += 1
+            next_iter = (datetime.now(timezone.utc) < until) if until is not None else (i < cycles)
+            if next_iter and interval > 0:
                 time.sleep(interval)
     finally:
         agent.close()
+    if until is not None:
+        console.print(f"[green]contest window complete[/green] · {completed} cycles executed")
     return 0
 
 
@@ -265,6 +339,31 @@ def cmd_preflight(args) -> int:
     except Exception as e:
         add("warn", "Market data", f"degraded: {type(e).__name__}")
 
+    # --- daily-floor guarantee ---------------------------------------------
+    add("info", "Daily-floor guarantee",
+        f">=1 trade/day forced from {int(s.contest.min_trade_deadline_hour):02d}:00 UTC, "
+        f"{s.contest.min_trade_retry_attempts}x retry + supervised buffer to 24:00")
+
+    # --- RPC redundancy (live on-chain reads) ------------------------------
+    try:
+        from .data import rpc
+        urls = rpc.endpoints(s)
+        if live:
+            results = rpc.health(s)
+            healthy = [r for r in results if r.ok]
+            if healthy:
+                best = min(healthy, key=lambda r: r.latency_ms)
+                add("ok" if len(healthy) >= 2 else "warn", "RPC redundancy",
+                    f"{len(healthy)}/{len(results)} BSC endpoints live "
+                    f"(best {best.url.split('//', 1)[-1]} {best.latency_ms:.0f}ms)")
+            else:
+                add("fail", "RPC redundancy", f"0/{len(results)} BSC endpoints reachable")
+        else:
+            add("info", "RPC redundancy",
+                f"{len(urls)} BSC endpoints configured (probed only when live)")
+    except Exception as e:
+        add("warn", "RPC redundancy", f"probe error: {type(e).__name__}")
+
     # --- render -------------------------------------------------------------
     glyph = {"ok": "[green]✓[/green]", "warn": "[yellow]●[/yellow]",
              "fail": "[red]✗[/red]", "info": "[dim]·[/dim]"}
@@ -353,6 +452,11 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--dry-run", action="store_true", help="decide but do not trade")
     pr.add_argument("--cycles", default=1, help="number of decision cycles")
     pr.add_argument("--interval", default=0, help="seconds between cycles")
+    pr.add_argument("--until", default=None,
+                    help="run continuously until this UTC time (ISO-8601), e.g. the "
+                         "contest end; implies --supervise (default hourly cadence)")
+    pr.add_argument("--supervise", action="store_true",
+                    help="resilient loop: log + recover from a failed cycle instead of crashing")
     pr.set_defaults(func=cmd_run)
 
     sub.add_parser("verify", help="verify the audit ledger").set_defaults(func=cmd_verify)

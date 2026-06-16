@@ -178,7 +178,7 @@ mode and only *adds* capabilities when credentials are present.
 | Command | What it does |
 |---|---|
 | `helm signal` | One-shot regime + ranked shortlist + contest posture. |
-| `helm run [--dry-run] [--cycles N] [--interval S]` | Run the agent loop. |
+| `helm run [--dry-run] [--cycles N] [--interval S] [--until ISO] [--supervise]` | Run the agent loop; `--until` runs continuously to a deadline with crash-recovery. |
 | `helm preflight` | Contest-readiness checklist (paper- or live-aware). |
 | `helm status` | Portfolio + ledger snapshot. |
 | `helm verify` | Re-verify the hash-chained audit ledger. |
@@ -332,12 +332,35 @@ HELM_PROFILE=aggressive       # the contest posture (tuned for total return)
 ```bash
 python -m helm.cli identity     # mint ERC-8004 identity (BNB AI Agent SDK)
 python -m helm.cli register      # register for the competition (TWAK)
-python -m helm.cli preflight     # confirm READY — every arming check must be green
-python -m helm.cli run --cycles 1000 --interval 900   # autonomous, 15-min cadence
+python -m helm.cli preflight     # confirm READY -- every arming check must be green
+
+# Run the full contest week under the process-level watchdog: auto-restarts on a
+# hard crash and resumes from the last on-disk checkpoint (no loss, no double-trade).
+bash scripts/run_live.sh 2026-06-28T12:00:00Z 3600   # END_UTC, interval seconds
 ```
 
 Live swaps still pass through Sentinel + the on-chain security checklist, and
 remain quote-only unless **all** arming flags are set.
+
+### Built to survive the whole week unattended
+
+Track 1 is scored on a *live* week -- an agent that crashes at 03:00 UTC and stops
+trading is worse than a mediocre one. HELM has three independent keep-alive layers:
+
+1. **In-process supervisor** (`run --until <end>`) wraps every cycle: a transient
+   data / RPC / execution error is logged to the ledger, the in-memory book is
+   rolled back to the last on-disk checkpoint, and the loop continues. It only
+   gives up (non-zero exit) after several *consecutive* failures.
+2. **Process watchdog** (`scripts/run_live.sh`) relaunches the agent if the Python
+   process dies hard (OOM, kill, host blip). State persists after every step, so a
+   restart resumes exactly where it left off.
+3. **Redundant RPC + data** -- market data fails over across Binance hosts, on-chain
+   reads rotate through five public BSC endpoints, and the Fear & Greed feed has a
+   no-lookahead price-derived fallback. No single provider can blind the agent.
+
+And the disqualification floor is defended directly: the **>=1-trade/day** ping is
+forced from **18:00 UTC** (not 23:59) and retried, leaving hours of buffer for the
+supervisor to recover before the midnight deadline.
 
 ---
 
