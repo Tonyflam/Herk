@@ -101,8 +101,33 @@ class MetaController:
         return budget_left ** 1.3, budget_left, False
 
     # ------------------------------------------------------------ posture
+    def _catchup_risk_mult(
+        self, elapsed: float, budget_left: float, external_rank: int | None
+    ) -> float:
+        """Codified endgame escalation — a pre-committed function of how late it
+        is, how much survival budget remains, and rank urgency. No discretion.
+
+        Returns the baseline catch-up multiplier when survival budget is below
+        the escalation floor; otherwise ramps linearly toward the ceiling. The
+        result is still multiplied by the convex drawdown taper in ``assess``, so
+        escalation can never push risk through the halt line.
+        """
+        c = self.settings.contest
+        base, ceil = c.catchup_risk_mult, c.catchup_max_risk_mult
+        if budget_left < c.endgame_escalate_dd_budget_min:
+            return base  # too little survival margin to escalate beyond baseline
+        ef = c.endgame_phase_frac
+        lateness = max(0.0, min(1.0, (elapsed - ef) / max(1e-9, 1.0 - ef)))
+        floor = c.endgame_escalate_dd_budget_min
+        budget_head = max(0.0, min(1.0, (budget_left - floor) / max(1e-9, 1.0 - floor)))
+        urgency = 1.0
+        if external_rank is not None and external_rank > 3:
+            urgency = min(1.0, external_rank / 5.0)
+        return base + (ceil - base) * lateness * budget_head * urgency
+
     def _posture(
-        self, elapsed: float, ret_pct: float, external_rank: int | None
+        self, elapsed: float, ret_pct: float, external_rank: int | None,
+        budget_left: float,
     ) -> tuple[str, float, float, list[str]]:
         """Returns (posture, gross_mult, risk_mult, reasons)."""
         c = self.settings.contest
@@ -127,10 +152,12 @@ class MetaController:
             return "protect_lead", 0.80, 0.75, reasons
 
         if behind and endgame:
+            mult = self._catchup_risk_mult(elapsed, budget_left, external_rank)
             reasons.append(
-                f"CATCH_UP: {ret_pct:+.1f}% behind late → bounded variance (risk ×1.25)"
+                f"CATCH_UP: {ret_pct:+.1f}% behind late → codified escalation "
+                f"risk ×{mult:.2f} (budget_left {budget_left*100:.0f}%)"
             )
-            return "catch_up", 1.0, 1.25, reasons
+            return "catch_up", 1.0, mult, reasons
 
         reasons.append(f"BUILD: {ret_pct:+.1f}% → grow the stack (×1.0)")
         return "build", 1.0, 1.0, reasons
@@ -156,15 +183,26 @@ class MetaController:
 
         dd_factor, budget_left, halt = self._drawdown_factor(dd_pct)
         time_factor = self._time_factor(elapsed)
-        posture, gross_mult, risk_mult, reasons = self._posture(elapsed, ret_pct, external_rank)
+        posture, gross_mult, risk_mult, reasons = self._posture(
+            elapsed, ret_pct, external_rank, budget_left
+        )
 
         if halt:
             posture = "halt"
             reasons = [f"HALT: drawdown {dd_pct:.1f}% ≥ halt line "
                        f"{self.settings.contest.halt_drawdown_pct:.0f}% → no new risk"]
 
+        # Survival-gate the regime overlay: with full drawdown budget, only a
+        # fraction of the regime de-risking cut applies (stay deployed through
+        # fear spikes rather than de-risk into a V-recovery); as budget thins the
+        # cut ramps to full strength. Validated by backtest/regime_ab.py: the
+        # ungated overlay bled ~1.9% in a clean uptrend while helping in chop.
+        gate_floor = self.settings.regime.overlay_dd_gate_floor
+        regime_gate = gate_floor + (1.0 - gate_floor) * (1.0 - budget_left)
+        gated_regime_scale = 1.0 - (1.0 - regime_gross_scale) * regime_gate
+
         # Compose. Survival (dd_factor) gates everything. Regime folds into gross.
-        exposure_scale = dd_factor * time_factor * gross_mult * regime_gross_scale
+        exposure_scale = dd_factor * time_factor * gross_mult * gated_regime_scale
         aggression_scale = dd_factor * risk_mult
 
         exposure_scale = max(0.0, min(1.0, exposure_scale))
@@ -172,8 +210,11 @@ class MetaController:
 
         reasons.insert(0, f"phase={phase} elapsed={elapsed*100:.0f}% "
                           f"dd={dd_pct:.1f}% budget_left={budget_left*100:.0f}%")
-        if regime_gross_scale < 1.0:
-            reasons.append(f"regime gross ×{regime_gross_scale:.2f} folded in")
+        if gated_regime_scale < 1.0:
+            reasons.append(
+                f"regime gross ×{gated_regime_scale:.2f} folded in "
+                f"(raw ×{regime_gross_scale:.2f}, dd-gate ×{regime_gate:.2f})"
+            )
 
         return ContestPosture(
             phase=phase,

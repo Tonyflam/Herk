@@ -212,6 +212,13 @@ HELM ships **switchable risk profiles** (`profile:` in config, or `HELM_PROFILE`
 - **`max`** — an endgame catch-up dial (hottest, ~2-pt DQ margin) the
   meta-controller can lean on only if we're trailing late.
 
+> **The escalation is codified, not discretionary.** Rather than a human flipping
+> `HELM_PROFILE=max` on a hunch mid-contest (how disciplined agents tilt and blow
+> the gate), the meta-controller raises catch-up risk along a **pre-committed
+> curve** of *(lateness × surviving drawdown budget × rank)* — and it is always
+> multiplied by the convex survival taper, so escalation can never push risk
+> through the 30% gate. The engine decides, including about itself.
+
 ### A/B across three regimes (33-day windows, 6h rebalance, top-3)
 
 The point is not one lucky window — it's the *shape* across regimes, and what the
@@ -258,9 +265,37 @@ that wins a return race. **Every sampled week survived far under the 30% gate.**
 > extremely unlikely. That maximizes expected value across *all four* prizes.
 
 Costs (modeled square-root slippage + round-trip fees) are charged on every fill.
-Regime is held *neutral* in backtest (no historical Fear & Greed feed), so the
-live de-risking overlay would, if anything, make the bear/chop windows **more**
-conservative. Reproduce any window:
+
+#### The de-risking overlay is *validated*, not assumed
+
+HELM's live regime overlay (cut exposure when Fear & Greed collapses) used to run
+*neutral* in backtest because there's no historical F&G feed through our fetchers
+— meaning the overlay was an **untested control path**. We closed that gap. A
+no-lookahead proxy Fear & Greed is reconstructed from price action alone
+(momentum + realized-vol + breadth, [helm/signals/proxy_regime.py](helm/signals/proxy_regime.py))
+and replayed through the identical stack. Across three regimes, with the data
+loaded **once** per window so every arm sees byte-identical candles:
+
+| Regime (33d) | Overlay OFF | Overlay ON (raw) | **ON + survival-gate** |
+|---|---|---|---|
+| Bull (Q4-2024) | +16.5% | +20.0% | **+20.1%** |
+| Chop (Aug–Sep) | −3.6% | −4.3% | **−3.0%** (best) |
+| Bear (latest) | −10.8% | −8.7% | **−10.7%** |
+
+The raw overlay can *bleed return in a clean uptrend* (de-risking into a
+V-recovery) while helping in chop. So the overlay is **survival-gated**: with
+ample drawdown budget only a fraction of the cut applies (stay deployed through
+fear); as budget thins toward the gate, the cut ramps to full strength. The
+gated overlay is **≥ neutral in every regime tested** and best-in-class in chop.
+Reproduce:
+
+```bash
+python -m backtest.regime_ab                       # 3-arm A/B → backtest/regime_ab.json
+python -m helm.cli backtest --regime-overlay       # single run with the proxy overlay
+```
+
+The methodology windows above keep the overlay neutral (conservative baseline);
+live and the A/B harness exercise the validated gated overlay. Reproduce any window:
 
 ```bash
 HELM_PROFILE=aggressive python -m helm.cli backtest --end 2024-12-15   # bull

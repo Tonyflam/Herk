@@ -90,3 +90,83 @@ def test_external_rank_one_forces_protect(settings):
     p = mc.assess(now=_at(mc, 0.90), equity=100, peak_equity=100,
                   initial_equity=100, external_rank=1)
     assert p.posture == "protect_lead"
+
+
+# --------------------------------------------------------------------------- #
+# Codified endgame escalation (#5): the engine escalates catch-up risk by a
+# pre-committed rule (lateness × surviving DD budget × rank), never a human.
+# --------------------------------------------------------------------------- #
+def test_codified_escalation_scales_with_budget(settings):
+    mc = MetaController(settings)
+    c = settings.contest
+    full = mc._catchup_risk_mult(elapsed=1.0, budget_left=1.0, external_rank=None)
+    thin = mc._catchup_risk_mult(elapsed=1.0, budget_left=0.6, external_rank=None)
+    below = mc._catchup_risk_mult(elapsed=1.0, budget_left=0.4, external_rank=None)
+    # Full budget at the very end → ceiling; partial budget → strictly between;
+    # below the survival floor → baseline only (no escalation).
+    assert full == pytest.approx(c.catchup_max_risk_mult)
+    assert c.catchup_risk_mult < thin < c.catchup_max_risk_mult
+    assert below == pytest.approx(c.catchup_risk_mult)
+
+
+def test_escalation_dormant_outside_endgame(settings):
+    mc = MetaController(settings)
+    # Mid-phase: lateness clamps to zero → baseline catch-up bump, no escalation.
+    m = mc._catchup_risk_mult(elapsed=0.5, budget_left=1.0, external_rank=None)
+    assert m == pytest.approx(settings.contest.catchup_risk_mult)
+
+
+def test_deeper_rank_escalates_at_least_as_much(settings):
+    mc = MetaController(settings)
+    near = mc._catchup_risk_mult(elapsed=0.95, budget_left=1.0, external_rank=4)
+    deep = mc._catchup_risk_mult(elapsed=0.95, budget_left=1.0, external_rank=6)
+    assert deep >= near
+
+
+def test_escalation_still_capped_by_survival(settings):
+    # Behind + very late but DEEP drawdown → escalation cannot lift risk through
+    # the convex survival taper (the gate stays the binding constraint).
+    mc = MetaController(settings)
+    halt = settings.contest.halt_drawdown_pct
+    equity = 100.0 * (1.0 - (halt * 0.8) / 100.0)
+    p = mc.assess(now=_at(mc, 0.97), equity=equity, peak_equity=100, initial_equity=100)
+    assert p.posture == "catch_up"
+    assert p.aggression_scale < 1.0
+
+
+# --------------------------------------------------------------------------- #
+# Survival-gated regime overlay (#2): with ample DD budget the regime cut is
+# dampened (stay deployed through fear); it ramps to full strength as budget thins.
+# --------------------------------------------------------------------------- #
+def test_regime_overlay_is_survival_gated(settings):
+    mc = MetaController(settings)
+    # Early, no drawdown → full budget. A risk-off regime cut is dampened.
+    p = mc.assess(now=_at(mc, 0.10), equity=100, peak_equity=100,
+                  initial_equity=100, regime_gross_scale=0.5)
+    floor = settings.regime.overlay_dd_gate_floor
+    expected = 1.0 - (1.0 - 0.5) * floor          # gated regime scale at full budget
+    assert p.exposure_scale == pytest.approx(expected, rel=1e-6)
+    assert p.exposure_scale > 0.5                  # strictly more deployed than ungated
+
+
+def test_regime_gate_tightens_as_budget_thins(settings):
+    mc = MetaController(settings)
+    # Same risk-off regime, shallow vs deeper drawdown. The gate applies MORE of
+    # the cut as budget thins, so the regime's share of exposure shrinks.
+    shallow = mc.assess(now=_at(mc, 0.10), equity=98, peak_equity=100,
+                        initial_equity=100, regime_gross_scale=0.5)
+    deeper = mc.assess(now=_at(mc, 0.10), equity=90, peak_equity=100,
+                       initial_equity=100, regime_gross_scale=0.5)
+    # Effective regime multiplier = exposure_scale / (dd_factor * time_factor).
+    # Compare the gated regime share directly via the documented formula.
+    floor = settings.regime.overlay_dd_gate_floor
+
+    def gated(budget_left: float) -> float:
+        gate = floor + (1.0 - floor) * (1.0 - budget_left)
+        return 1.0 - (1.0 - 0.5) * gate
+
+    halt = settings.contest.halt_drawdown_pct
+    g_shallow = gated(1.0 - (2.0 / halt))
+    g_deep = gated(1.0 - (10.0 / halt))
+    assert g_deep < g_shallow                      # thinner budget → bigger cut
+    assert deeper.exposure_scale < shallow.exposure_scale

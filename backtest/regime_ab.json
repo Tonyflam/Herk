@@ -1,0 +1,52 @@
+{
+  "params": {
+    "days": 33,
+    "top": 3,
+    "warmup": 200,
+    "stride": 6
+  },
+  "windows": [
+    {
+      "window": "bull  (Q4-2024)",
+      "off_return_pct": 16.48,
+      "on_return_pct": 20.02,
+      "gated_return_pct": 20.09,
+      "gated_vs_off_pct": 3.61,
+      "off_max_dd_pct": 9.26,
+      "on_max_dd_pct": 7.82,
+      "gated_max_dd_pct": 8.3,
+      "btc_pct": 14.57,
+      "off_breached": false,
+      "on_breached": false,
+      "gated_breached": false
+    },
+    {
+      "window": "chop  (Aug-Sep)",
+      "off_return_pct": -3.62,
+      "on_return_pct": -4.33,
+      "gated_return_pct": -3.04,
+      "gated_vs_off_pct": 0.58,
+      "off_max_dd_pct": 11.47,
+      "on_max_dd_pct": 9.57,
+      "gated_max_dd_pct": 11.17,
+      "btc_pct": 0.2,
+      "off_breached": false,
+      "on_breached": false,
+      "gated_breached": false
+    },
+    {
+      "window": "bear  (latest)",
+      "off_return_pct": -10.76,
+      "on_return_pct": -8.68,
+      "gated_return_pct": -10.74,
+      "gated_vs_off_pct": 0.03,
+      "off_max_dd_pct": 12.06,
+      "on_max_dd_pct": 9.68,
+      "gated_max_dd_pct": 11.96,
+      "btc_pct": -17.22,
+      "off_breached": false,
+      "on_breached": false,
+      "gated_breached": false
+    }
+  ]
+}

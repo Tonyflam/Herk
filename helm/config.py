@@ -47,6 +47,13 @@ class ContestCfg:
     endgame_phase_frac: float = 0.80
     protect_lead_return_pct: float = 20.0
     catchup_behind_return_pct: float = 2.0
+    # Codified endgame escalation (pre-committed; the engine decides, not a human).
+    # When behind late with survival budget intact, per-trade risk is escalated
+    # along a graduated curve between these multipliers — never beyond the
+    # drawdown taper that protects the gate.
+    catchup_risk_mult: float = 1.25
+    catchup_max_risk_mult: float = 1.5
+    endgame_escalate_dd_budget_min: float = 0.5
 
 
 @dataclass
@@ -82,6 +89,11 @@ class RegimeCfg:
     btc_dominance_trend_lookback_h: int = 72
     use_derivatives_funding: bool = True
     risk_off_gross_scale: float = 0.35
+    # Survival-gated regime overlay: with full drawdown budget only this fraction
+    # of the regime de-risking cut is applied (stay deployed through fear spikes
+    # rather than de-risk into a V-recovery); as budget thins the cut ramps to
+    # full strength, reinforcing survival. 1.0 disables the gate (always full cut).
+    overlay_dd_gate_floor: float = 0.35
 
 
 @dataclass

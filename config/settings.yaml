@@ -35,6 +35,13 @@ contest:
   endgame_phase_frac: 0.80      # last 20% of window = lock posture by rank
   protect_lead_return_pct: 20.0 # cumulative return >= this -> PROTECT (minimize variance, just meet min-trade)
   catchup_behind_return_pct: 2.0  # if late & under this return -> allow BOUNDED extra variance (never breach halt)
+  # Codified endgame escalation (pre-committed; the ENGINE decides, not a human
+  # flipping HELM_PROFILE mid-contest). When behind late with survival budget
+  # intact, per-trade risk ramps along a graduated curve between these bounds --
+  # still multiplied by the convex drawdown taper, so it can never breach the gate.
+  catchup_risk_mult: 1.25            # baseline catch-up bump (behind, endgame)
+  catchup_max_risk_mult: 1.5         # ceiling when deeply behind, very late, full budget
+  endgame_escalate_dd_budget_min: 0.5  # only escalate past baseline with >= this DD budget left
 
 # ---------------------------------------------------------------------------
 # RISK — deterministic Sentinel limits. Enforced in code, never by the LLM.
@@ -73,6 +80,12 @@ regime:
   btc_dominance_trend_lookback_h: 72
   use_derivatives_funding: true          # funding/OI from CMC derivatives metrics
   risk_off_gross_scale: 0.35             # multiply gross exposure by this when risk-off
+  # Survival-gated overlay: with full drawdown budget only this fraction of the
+  # regime de-risking cut applies (stay deployed through fear spikes instead of
+  # de-risking into a V-recovery); as budget thins the cut ramps to full strength.
+  # Validated in backtest/regime_ab.py -- gated overlay is >= neutral in every
+  # regime tested (bull/chop/bear) and best-in-class in chop. 1.0 disables the gate.
+  overlay_dd_gate_floor: 0.35
 
 # ---------------------------------------------------------------------------
 # DATA — provider priority with honest fallback chain.
@@ -139,6 +152,7 @@ profiles:
       top_n: 3                            # concentrated, but diversified enough to survive
     regime:
       risk_off_gross_scale: 0.62          # stay ~60%+ deployed even in fear (vs 35%)
+      overlay_dd_gate_floor: 0.30         # lean deployed through fear (gate cuts less while budget healthy)
 
   # Endgame catch-up posture: hottest dial, ~2-pt DQ margin. Deliberate use only —
   # the meta-controller's convex drawdown taper still cuts exposure before the gate.
@@ -147,6 +161,7 @@ profiles:
       halt_drawdown_pct: 28.0
       protect_lead_return_pct: 35.0
       catchup_behind_return_pct: 6.0
+      endgame_escalate_dd_budget_min: 0.4  # escalate with a touch less budget in last-resort mode
     risk:
       target_portfolio_vol_annual: 1.20
       max_gross_exposure: 0.99
@@ -159,4 +174,5 @@ profiles:
       top_n: 2
     regime:
       risk_off_gross_scale: 0.80
+      overlay_dd_gate_floor: 0.25
 

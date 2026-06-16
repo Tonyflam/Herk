@@ -303,7 +303,8 @@ def cmd_backtest(args) -> int:
         end_ms = int(datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc).timestamp() * 1000)
     try:
         run(settings, days=args.days, top_n=args.top, warmup=args.warmup,
-            stride=args.stride, end_ms=end_ms, verbose=True)
+            stride=args.stride, end_ms=end_ms,
+            regime_overlay=getattr(args, "regime_overlay", False), verbose=True)
     except Exception as e:
         console.print(f"[red]backtest failed:[/red] {type(e).__name__}: {e}")
         return 1
@@ -369,6 +370,8 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--warmup", type=int, default=200, help="warmup bars before trading")
     pb.add_argument("--stride", type=int, default=6, help="rebalance cadence in hours")
     pb.add_argument("--end", type=str, default=None, help="window end date YYYY-MM-DD (default: latest)")
+    pb.add_argument("--regime-overlay", action="store_true",
+                    help="replay the F&G de-risking overlay via a no-lookahead proxy")
     pb.set_defaults(func=cmd_backtest)
 
     sub.add_parser("dashboard", help="launch the public dashboard").set_defaults(func=cmd_dashboard)

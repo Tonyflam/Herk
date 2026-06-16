@@ -10,8 +10,9 @@ Honesty notes (judges reward these):
     curated tradeable universe, which existed across the window.
   * Costs are charged: modeled square-root slippage + round-trip fees on every
     fill. Stops/TPs are checked intrabar against each bar's high/low.
-  * Regime is held neutral in backtest (no historical F&G feed), so the result is
-    if anything *conservative* vs. the live de-risking overlay.
+  * Regime defaults to neutral (a conservative baseline). Pass ``regime_overlay``
+    (CLI ``--regime-overlay``) to replay the live de-risking overlay via a
+    no-lookahead proxy Fear & Greed; ``backtest/regime_ab.py`` A/B-tests it.
 
 Run:  python -m backtest.walk_forward --days 40 --top 3 --stride 6
       helm backtest --days 40
@@ -37,6 +38,7 @@ from helm.portfolio import Portfolio
 from helm.risk.sentinel import Sentinel
 from helm.risk.sizing import plan_position
 from helm.signals.engine import SignalEngine
+from helm.signals.proxy_regime import proxy_fear_greed
 from helm.universe import tradeable_universe
 
 Row = tuple[int, float, float, float, float, float]  # (open_ms, o, h, l, c, v)
@@ -51,11 +53,20 @@ class HistoricalMarket:
     """Implements the slice of MarketData that SignalEngine consumes, but only
     ever reveals data at or before ``cursor_ts`` (no lookahead)."""
 
-    def __init__(self, settings: Settings, history: dict[str, list[Row]]):
+    def __init__(
+        self,
+        settings: Settings,
+        history: dict[str, list[Row]],
+        btc_rows: list[Row] | None = None,
+        regime_overlay: bool = False,
+    ):
         self.settings = settings
         self._rows = history
         self._ts = {s: [r[0] for r in rows] for s, rows in history.items()}
         self.cursor_ts = 0
+        self.regime_overlay = regime_overlay
+        self._btc_rows = btc_rows or []
+        self._btc_ts = [r[0] for r in self._btc_rows]
 
     def idx(self, symbol: str) -> int:
         ts = self._ts.get(symbol)
@@ -87,8 +98,35 @@ class HistoricalMarket:
         pct = (price / prev - 1.0) * 100.0 if prev > 0 else 0.0
         return Quote(symbol, price, vol_usd, pct, Provenance("backtest"))
 
+    def _breadth_frac(self) -> float | None:
+        """Share of universe names trading above their own trailing 7d mean."""
+        above = total = 0
+        for sym, rows in self._rows.items():
+            i = self.idx(sym)
+            if i < 168:
+                continue
+            close = rows[i][4]
+            sma = sum(r[4] for r in rows[i - 167: i + 1]) / 168.0
+            total += 1
+            if sma > 0 and close > sma:
+                above += 1
+        return (above / total) if total else None
+
     def get_regime(self) -> Regime:
-        return Regime()  # neutral; no historical F&G feed
+        # Default (published) behavior: neutral — the overlay is held flat.
+        if not self.regime_overlay or not self._btc_rows:
+            return Regime()
+        bi = bisect.bisect_right(self._btc_ts, self.cursor_ts) - 1
+        if bi < 168:
+            return Regime()
+        closes = [r[4] for r in self._btc_rows[: bi + 1]]
+        fg, cls = proxy_fear_greed(closes, self._breadth_frac())
+        # BTC dominance needs market caps we can't reconstruct from candles, so
+        # it stays neutral — this isolates the F&G de-risking lever under test.
+        return Regime(
+            fear_greed=fg, fg_class=cls, btc_dominance=50.0,
+            sources={"fear_greed": "proxy", "btc_dominance": "neutral"},
+        )
 
     def close(self) -> None:
         pass
@@ -120,21 +158,29 @@ class BacktestResult:
 # --------------------------------------------------------------------------- #
 # Data loading
 # --------------------------------------------------------------------------- #
-def load_history(symbols: list[str], bars: int, end_ms: int | None = None) -> tuple[dict[str, list[Row]], list[Row]]:
+def load_history(symbols: list[str], bars: int, end_ms: int | None = None,
+                 retries: int = 3) -> tuple[dict[str, list[Row]], list[Row]]:
     client = httpx.Client()
     history: dict[str, list[Row]] = {}
-    try:
-        for sym in symbols:
+
+    def _pull(sym: str) -> list[Row] | None:
+        # Retry transient fetch failures so the tradeable set is reproducible
+        # across runs (a silently-dropped symbol changes the whole backtest).
+        for _ in range(max(1, retries)):
             try:
                 c = fetch_klines(sym, "1h", bars, client=client, end_ms=end_ms)
                 if len(c) >= 60:
-                    history[sym] = c.rows
+                    return c.rows
             except Exception:
                 continue
-        try:
-            btc = fetch_klines("BTC", "1h", bars, client=client, end_ms=end_ms).rows
-        except Exception:
-            btc = []
+        return None
+
+    try:
+        for sym in symbols:
+            rows = _pull(sym)
+            if rows is not None:
+                history[sym] = rows
+        btc = _pull("BTC") or []
     finally:
         client.close()
     return history, btc
@@ -212,6 +258,9 @@ def run(
     warmup: int = 200,
     stride: int = 6,
     end_ms: int | None = None,
+    regime_overlay: bool = False,
+    history: dict[str, list[Row]] | None = None,
+    btc: list[Row] | None = None,
     verbose: bool = True,
 ) -> BacktestResult:
     settings = settings or load_settings()
@@ -223,14 +272,16 @@ def run(
     ))
     if verbose:
         window = "latest" if end_ms is None else datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).date().isoformat()
-        print(f"[backtest] fetching {len(symbols)} symbols × {bars} bars (1h), window end={window}…")
-    history, btc = load_history(symbols, bars, end_ms=end_ms)
+        overlay = "proxy F&G overlay ON" if regime_overlay else "regime neutral"
+        print(f"[backtest] fetching {len(symbols)} symbols × {bars} bars (1h), window end={window}, {overlay}…")
+    if history is None or btc is None:
+        history, btc = load_history(symbols, bars, end_ms=end_ms)
     if len(history) < 3 or not btc:
         raise RuntimeError("insufficient historical data (network?). Need ≥3 symbols + BTC.")
 
     clock = [r[0] for r in btc]
     btc_close = {r[0]: r[4] for r in btc}
-    mkt = HistoricalMarket(settings, history)
+    mkt = HistoricalMarket(settings, history, btc_rows=btc, regime_overlay=regime_overlay)
     engine = SignalEngine(settings, mkt)
     meta = MetaController(settings)
     sentinel = Sentinel(settings, kill_switch_path="/tmp/helm.BACKTEST.nokill")
@@ -359,13 +410,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--warmup", type=int, default=200, help="warmup bars before trading")
     ap.add_argument("--stride", type=int, default=6, help="rebalance cadence in hours")
     ap.add_argument("--end", type=str, default=None, help="window end date YYYY-MM-DD (default: latest)")
+    ap.add_argument("--regime-overlay", action="store_true",
+                    help="replay the live F&G de-risking overlay via a no-lookahead proxy (default: neutral)")
     args = ap.parse_args(argv)
     end_ms = None
     if args.end:
         end_ms = int(datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc).timestamp() * 1000)
     try:
         run(days=args.days, top_n=args.top, warmup=args.warmup, stride=args.stride,
-            end_ms=end_ms, verbose=True)
+            end_ms=end_ms, regime_overlay=args.regime_overlay, verbose=True)
         return 0
     except Exception as e:
         print(f"backtest failed: {type(e).__name__}: {e}")
