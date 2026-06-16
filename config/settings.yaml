@@ -179,6 +179,17 @@ profiles:
 
   # Endgame catch-up posture: hottest dial, ~2-pt DQ margin. Deliberate use only —
   # the meta-controller's convex drawdown taper still cuts exposure before the gate.
+  #
+  # *** THIS IS THE CONTEST PROFILE (set HELM_PROFILE=max for the live week). ***
+  # Validated 2026-06-16 across 6 historical windows + the full neutral window:
+  # Pareto-dominant for the return-ranked, winner-take-all prize. In up-weeks it
+  # captured +11..+21% vs `aggressive`'s ~0% (cross-sectional rotation is ~market-
+  # neutral, so aggressive cedes a return race); in down-weeks it is only ~1pt
+  # worse, with worst realized drawdown 18% — well under the 28% halt / 30% DQ.
+  # The top_n=2 @ 50% concentration removes the churning 3rd-slot rotation that
+  # whipsawed `aggressive` (25-29% -> 50-71% win-rate, fewer trades, less gas).
+  # Single-name risk is bounded: the curated book is liquid majors only (no
+  # rug-prone micro-caps) and Sentinel pre-trade checks run on every live entry.
   max:
     contest:
       halt_drawdown_pct: 28.0
