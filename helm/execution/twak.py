@@ -122,6 +122,19 @@ class TwakAdapter(ExecutionAdapter):
     def wallet_address(self, chain: str = "smartchain") -> TwakResult:
         return self._run(["wallet", "address", "--chain", chain])
 
+    def wallet_create(self) -> TwakResult:
+        """Create the self-custodied TWAK wallet (no broadcast, no funds).
+
+        Generates a fresh BIP39 HD wallet encrypted at ``~/.twak/wallet.json``.
+        Requires ``twak_wallet_password`` (resolved via ``_pw``). The password
+        is passed through subprocess args — never echoed by HELM.
+        """
+        if not self.available:
+            return TwakResult(False, note="TWAK CLI not found; see scripts/setup_live.sh")
+        if not self.s.secrets.twak_wallet_password:
+            return TwakResult(False, note="missing TWAK_WALLET_PASSWORD")
+        return self._run(["wallet", "create", *self._pw()])
+
     def compete_register(self) -> TwakResult:
         if not self.available:
             return TwakResult(False, note="TWAK CLI not found; see scripts/setup_live.sh")
