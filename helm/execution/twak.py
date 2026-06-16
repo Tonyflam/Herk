@@ -230,13 +230,38 @@ class TwakAdapter(ExecutionAdapter):
         except Exception:
             pass
 
+        # Gas: prefer the real receipt cost when TWAK reports one, else fall back
+        # to the configured conservative estimate. Modeling gas LIVE the same way
+        # paper does keeps the two ledgers comparable (see parity note in agent).
+        gas = self._receipt_gas_usd(d)
+        if gas is None:
+            gas = self.s.risk.gas_usd_per_swap if qty > 0 else 0.0
+
         tx = ""
         m = re.search(r"0x[a-fA-F0-9]{64}", (res.stdout or "") + (res.stderr or ""))
         if m:
             tx = m.group(0)
 
         f = Fill(order.symbol, order.side, qty, price, notional, fee, est_slip,
-                 _now_iso(), "twak", ok=bool(qty > 0))
+                 _now_iso(), "twak", ok=bool(qty > 0), gas_usd=gas)
         if tx:
             f.note = f"tx={tx}"
         return f
+
+    @staticmethod
+    def _receipt_gas_usd(d: dict) -> float | None:
+        """Pull an actual USD gas cost from a TWAK swap receipt if present.
+
+        Tries common keys defensively (the CLI schema may vary); returns None
+        when no usable figure is found so the caller uses the modeled estimate.
+        """
+        if not isinstance(d, dict):
+            return None
+        for key in ("gasFeeUsd", "networkFeeUsd", "gasUsd", "feeUsd"):
+            v = d.get(key)
+            try:
+                if v is not None and float(v) >= 0:
+                    return float(v)
+            except (TypeError, ValueError):
+                continue
+        return None

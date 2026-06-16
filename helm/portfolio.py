@@ -50,6 +50,7 @@ class Portfolio:
     _day: date | None = None
     realized_pnl: float = 0.0
     fees_paid: float = 0.0
+    gas_paid: float = 0.0
     trades_today: int = 0
     total_trades: int = 0
 
@@ -88,9 +89,10 @@ class Portfolio:
     # --------------------------------------------------------------- fills
     def apply_buy(self, fill: Fill, stop_price: float, take_profit_price: float,
                   stop_distance: float) -> None:
-        cost = fill.notional_usd + fill.fee_usd
+        cost = fill.notional_usd + fill.fee_usd + fill.gas_usd
         self.cash -= cost
         self.fees_paid += fill.fee_usd
+        self.gas_paid += fill.gas_usd
         self.trades_today += 1
         self.total_trades += 1
         existing = self.positions.get(fill.symbol)
@@ -115,13 +117,14 @@ class Portfolio:
     def apply_sell(self, fill: Fill) -> float:
         """Apply a sell fill; returns realized P&L for the closed quantity."""
         pos = self.positions.get(fill.symbol)
-        self.cash += fill.notional_usd - fill.fee_usd
+        self.cash += fill.notional_usd - fill.fee_usd - fill.gas_usd
         self.fees_paid += fill.fee_usd
+        self.gas_paid += fill.gas_usd
         self.trades_today += 1
         self.total_trades += 1
         realized = 0.0
         if pos:
-            realized = (fill.price - pos.avg_entry) * fill.qty - fill.fee_usd
+            realized = (fill.price - pos.avg_entry) * fill.qty - fill.fee_usd - fill.gas_usd
             self.realized_pnl += realized
             pos.qty -= fill.qty
             if pos.qty <= 1e-12:
@@ -167,6 +170,7 @@ class Portfolio:
             if self.peak_equity > 0 else 0.0,
             "realized_pnl": self.realized_pnl,
             "fees_paid": self.fees_paid,
+            "gas_paid": self.gas_paid,
             "open_positions": len(self.positions),
             "trades_today": self.trades_today,
             "total_trades": self.total_trades,

@@ -275,6 +275,13 @@ class Agent:
             order = Order(ex.symbol, "sell", ref_price=ex.ref_price, qty=ex.qty,
                           liquidity_usd=1e9, reason=ex.reason)
             fill = self.executor.execute(order)
+            if not fill.ok or fill.qty <= 0:
+                # Failed live exit: leave the position booked (it is still held
+                # on-chain) and retry next cycle rather than log a phantom close.
+                self.ledger.append("alert", {"reason": "exit_unfilled",
+                                              "symbol": ex.symbol, "note": fill.note[:80]})
+                actions.append(Action("blocked", ex.symbol, f"exit unfilled: {fill.note[:60]}"))
+                continue
             realized = self.portfolio.apply_sell(fill)
             self.ledger.append("trade", {**asdict(fill), "reason": ex.reason,
                                           "realized_pnl": round(realized, 4)})
@@ -338,6 +345,14 @@ class Agent:
                           notional_usd=plan.notional_usd, liquidity_usd=sig.liquidity_usd,
                           reason="entry")
             fill = self.executor.execute(order)
+            if not fill.ok or fill.notional_usd <= 0 or fill.qty <= 0:
+                # A failed/empty live swap must NOT book a phantom position or a
+                # trade record — paper never fails here, so skipping keeps the
+                # live ledger faithful to the simulated one.
+                self.ledger.append("alert", {"reason": "entry_unfilled",
+                                              "symbol": sig.symbol, "note": fill.note[:80]})
+                actions.append(Action("blocked", sig.symbol, f"entry unfilled: {fill.note[:60]}"))
+                continue
             self.portfolio.apply_buy(fill, plan.stop_price, plan.take_profit_price,
                                      plan.stop_distance)
             consumed += fill.notional_usd

@@ -55,6 +55,7 @@ class Fill:
     source: str
     ok: bool = True
     note: str = ""
+    gas_usd: float = 0.0       # BSC network gas burned on this swap (0 in pure sim if no fill)
 
 
 class ExecutionAdapter(ABC):

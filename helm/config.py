@@ -76,6 +76,18 @@ class RiskCfg:
     slippage_bps_max: float = 150.0
     min_liquidity_usd: float = 250_000.0
     fee_bps_roundtrip: float = 60.0
+    # Flat BSC network gas charged per swap (USD), modeled in BOTH paper and live
+    # so the simulator is never blind to the one cost that always hits live and
+    # never hits a naive backtest. ~150k gas x ~1-3 gwei x BNB price ~= $0.10-0.30;
+    # the default is set at the conservative end so paper, if anything, runs
+    # PESSIMISTIC vs live (live should beat the sim, never disappoint). The live
+    # adapter overrides this with the actual receipt gas when it can read one.
+    gas_usd_per_swap: float = 0.30
+    # A single swap's gas must stay below this fraction of its notional, else the
+    # trade is rejected as uneconomic. Makes the dust floor gas-aware: it auto-
+    # scales up if gas rises, and is inert on a properly-funded book. Protects a
+    # small book from death-by-gas (a $1 trade paying $0.30 gas loses 30%).
+    gas_max_pct_of_notional: float = 0.015
 
 
 @dataclass

@@ -144,6 +144,7 @@ class BacktestResult:
     n_trades: int
     win_rate_pct: float
     fees_paid: float
+    gas_paid: float
     btc_buyhold_pct: float
     excess_vs_btc_pct: float
     breached_halt: bool
@@ -352,7 +353,7 @@ def run(
         days=span_days, bars=len(clock) - start, initial_equity=pf.initial_equity,
         final_equity=final_eq, total_return_pct=total_ret, max_drawdown_pct=max_dd,
         sharpe_annual=sharpe, n_trades=pf.total_trades, win_rate_pct=win_rate,
-        fees_paid=pf.fees_paid, btc_buyhold_pct=btc_ret,
+        fees_paid=pf.fees_paid, gas_paid=pf.gas_paid, btc_buyhold_pct=btc_ret,
         excess_vs_btc_pct=total_ret - btc_ret, breached_halt=breached, equity_curve=curve,
     )
     if verbose:
@@ -406,7 +407,7 @@ def _print_report(r: BacktestResult, settings: Settings) -> None:
         t.add_row("Max drawdown", f"{r.max_drawdown_pct:.2f}%  (halt line {settings.contest.halt_drawdown_pct:.0f}%)")
         t.add_row("Sharpe (ann.)", f"{r.sharpe_annual:.2f}")
         t.add_row("Trades / win-rate", f"{r.n_trades} / {r.win_rate_pct:.0f}%")
-        t.add_row("Fees paid", f"${r.fees_paid:.2f}")
+        t.add_row("Fees / gas paid", f"${r.fees_paid:.2f} / ${r.gas_paid:.2f}")
         t.add_row("Survival", verdict)
         c.print(t)
     except Exception:

@@ -63,6 +63,12 @@ risk:
   slippage_bps_max: 150              # reject a fill if quoted slippage exceeds this
   min_liquidity_usd: 250000          # skip tokens below this 24h volume (honeypot/illiquidity guard)
   fee_bps_roundtrip: 60              # simulated round-trip cost used by the edge gate
+  gas_usd_per_swap: 0.30             # BSC network gas charged PER swap, modeled in paper AND live
+                                     # (~150k gas x 1-3 gwei x BNB price). Conservative on purpose so
+                                     # the simulator runs pessimistic vs live; the live adapter
+                                     # overrides it with the real receipt gas when it can read one.
+  gas_max_pct_of_notional: 0.015     # reject a swap whose gas exceeds this fraction of its notional
+                                     # (gas-aware dust floor: min trade = gas / this, ~$20 at defaults).
 
 # ---------------------------------------------------------------------------
 # SIGNALS — cross-sectional momentum / relative strength + vol.

@@ -140,8 +140,15 @@ class Sentinel:
                             f"{est_slippage_bps:.0f}bps vs max {r.slippage_bps_max:.0f}bps"))
 
         notional = plan.notional_usd if plan else 0.0
-        checks.append(Check("dust_floor", notional >= c.dust_floor_usd and bool(plan) and plan.ok,
-                            f"notional ${notional:,.2f} vs dust ${c.dust_floor_usd:.2f}"))
+        # Gas-aware dust floor: a swap's fixed BSC gas must stay a small fraction
+        # of its notional, else churn bleeds the book (a $1 trade paying $0.30
+        # gas is 30% lost to gas alone). The floor auto-scales with the gas
+        # estimate and is inert once positions are comfortably sized.
+        gas_floor = (r.gas_usd_per_swap / r.gas_max_pct_of_notional
+                     if r.gas_max_pct_of_notional > 0 else 0.0)
+        min_notional = max(c.dust_floor_usd, gas_floor)
+        checks.append(Check("dust_floor", notional >= min_notional and bool(plan) and plan.ok,
+                            f"notional ${notional:,.2f} vs floor ${min_notional:,.2f}"))
 
         if security is not None:
             checks.extend(security.to_checks())

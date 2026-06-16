@@ -34,6 +34,7 @@ class PaperExecutor(ExecutionAdapter):
             notional = qty * price
 
         fee = notional * (fee_bps_side / 10_000.0)
+        gas = cfg.gas_usd_per_swap if qty > 0 else 0.0
         return Fill(
             symbol=order.symbol,
             side=order.side,
@@ -45,4 +46,5 @@ class PaperExecutor(ExecutionAdapter):
             ts=_now_iso(),
             source="paper",
             ok=qty > 0,
+            gas_usd=gas,
         )

@@ -22,7 +22,7 @@ def _posture(max_gross_pct=0.90, halt=False, posture="build"):
     )
 
 
-def _plan(notional=15.0, pct=0.15):
+def _plan(notional=25.0, pct=0.15):
     return SizePlan(
         symbol="UNI", price=100.0, atr=5.0, stop_price=87.5,
         take_profit_price=120.0, stop_distance=12.5, risk_budget_usd=1.5,
