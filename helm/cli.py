@@ -364,6 +364,32 @@ def cmd_preflight(args) -> int:
     except Exception as e:
         add("warn", "RPC redundancy", f"probe error: {type(e).__name__}")
 
+    # --- scoring rules (must be confirmed against official spec) ------------
+    sc = s.scoring
+    mark_src = "on-chain balances" if sc.mark_from_onchain else "booked qty"
+    add("info", "Scoring assumptions",
+        f">=${sc.min_hold_usd_per_hour:.0f}/hr held, in-scope-only={sc.must_hold_in_scope}, "
+        f"marked from {mark_src}")
+    if sc.confirmed:
+        add("ok", "Scoring rules confirmed",
+            "verified against official rules" + (f" ({sc.rules_url})" if sc.rules_url else ""))
+    else:
+        add("warn", "Scoring rules confirmed",
+            "NOT yet confirmed — verify vs official rules, then set scoring.confirmed: true")
+
+    # --- on-chain marking readiness ----------------------------------------
+    if live and sc.mark_from_onchain:
+        try:
+            from .data import onchain
+            w = onchain.resolve_wallet(s)
+            add("ok" if w else "fail", "On-chain marking",
+                f"wallet {w[:10]}… resolved" if w else "no wallet address (set execution.wallet_address)")
+        except Exception as e:
+            add("warn", "On-chain marking", f"unavailable: {type(e).__name__}")
+    else:
+        add("info", "On-chain marking",
+            "enabled for live" if sc.mark_from_onchain else "disabled (marking from booked qty)")
+
     # --- render -------------------------------------------------------------
     glyph = {"ok": "[green]✓[/green]", "warn": "[yellow]●[/yellow]",
              "fail": "[red]✗[/red]", "info": "[dim]·[/dim]"}
@@ -408,6 +434,104 @@ def cmd_backtest(args) -> int:
         console.print(f"[red]backtest failed:[/red] {type(e).__name__}: {e}")
         return 1
     return 0
+
+
+def cmd_routes(args) -> int:
+    """Pre-validate that every in-scope symbol has a tradeable route + acceptable
+    cost. Exit non-zero if any name in the active trading book is unroutable, so
+    this can gate go-live. Offline-safe; ``--live-probe`` adds TWAK quote-only."""
+    import json as _json
+
+    from .agent import RUNTIME_DIR
+    from .data.market import MarketData
+    from .data.routes import summarize, validate_routes
+    from .universe import ELIGIBLE, tradeable_universe
+
+    s = load_settings()
+    book = set(tradeable_universe(
+        use_curated=s.universe.use_curated_tradeable,
+        extra=tuple(s.universe.extra_tradeable),
+        exclude=tuple(s.universe.exclude),
+    ))
+    scope = list(ELIGIBLE) if getattr(args, "all", False) else sorted(book | {"USDT"})
+    md = MarketData(s)
+    try:
+        checks = validate_routes(s, scope, md, tradeable=book)
+        # Optional live route truth via TWAK quote-only swaps.
+        if getattr(args, "live_probe", False):
+            _live_probe_routes(s, [c for c in checks if c.tradeable], md)
+    finally:
+        md.close()
+
+    sm = summarize(checks)
+    glyph = {"ok": "[green]✓[/green]", "thin": "[yellow]●[/yellow]", "dead": "[red]✗[/red]"}
+    table = Table(title=f"HELM route validation — {len(checks)} symbols "
+                        f"({sm['tradeable_ok']}/{sm['tradeable_total']} tradeable OK)",
+                  show_header=True, header_style="bold")
+    table.add_column("", justify="center", width=3)
+    table.add_column("sym")
+    table.add_column("book", justify="center")
+    table.add_column("price", justify="right")
+    table.add_column("24h vol", justify="right")
+    table.add_column("slip", justify="right")
+    table.add_column("note")
+    # Show the trading book always; for in-scope-only view hide healthy non-book names.
+    show_all = getattr(args, "all", False)
+    for c in checks:
+        if not show_all and not c.tradeable and c.status == "ok":
+            continue
+        table.add_row(
+            glyph.get(c.status, "?"), c.symbol,
+            "[cyan]●[/cyan]" if c.tradeable else ("·" if c.in_scope else "[red]✗[/red]"),
+            f"${c.price:,.4f}" if c.price else "—",
+            f"${c.vol_24h_usd:,.0f}" if c.vol_24h_usd else "—",
+            f"{c.est_slippage_bps:.0f}bps" if c.est_slippage_bps else "—",
+            c.note,
+        )
+    console.print(table)
+
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = RUNTIME_DIR / "routes.json"
+    out_path.write_text(_json.dumps(
+        {"summary": sm, "checks": [vars(c) for c in checks]}, indent=2))
+    console.print(f"wrote {out_path}")
+
+    bad = sm["tradeable_bad"]
+    if bad:
+        names = ", ".join(c.symbol for c in checks if c.tradeable and c.status != "ok")
+        console.print(Panel(f"[red]{bad} tradeable name(s) unroutable[/red]: {names}",
+                            title="route check"))
+        return 1
+    console.print(Panel(f"[green]all {sm['tradeable_total']} tradeable names routable[/green] "
+                        f"({sm['thin']} thin / {sm['dead']} dead among in-scope extras)",
+                        title="route check"))
+    return 0
+
+
+def _live_probe_routes(settings, checks, market) -> None:
+    """Best-effort TWAK quote-only swap per tradeable name to confirm a real
+    on-DEX route. Annotates each check's note; never raises."""
+    try:
+        from .execution.twak import TwakAdapter
+        from .execution.base import Order
+    except Exception:
+        return
+    adapter = TwakAdapter(settings)
+    if not adapter.available:
+        console.print("[yellow]--live-probe: TWAK CLI not found; skipped[/yellow]")
+        return
+    ref = max(1.0, settings.risk.max_position_pct * settings.capital.initial_paper_equity_usd)
+    for c in checks:
+        if c.price <= 0:
+            continue
+        order = Order(c.symbol, "buy", ref_price=c.price, notional_usd=ref,
+                      liquidity_usd=c.vol_24h_usd, reason="route_probe")
+        try:
+            res = adapter._run(["swap", f"{ref:.6f}", settings.capital.base_currency,
+                                c.symbol.upper(), "--quote-only"])
+            c.note = (c.note + " | " if c.note else "") + ("route ok" if res.ok else "no route")
+        except Exception:
+            c.note = (c.note + " | " if c.note else "") + "probe error"
 
 
 def _print_report(report, title: str) -> None:
@@ -477,6 +601,12 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--regime-overlay", action="store_true",
                     help="replay the F&G de-risking overlay via a no-lookahead proxy")
     pb.set_defaults(func=cmd_backtest)
+
+    prt = sub.add_parser("routes", help="pre-validate token routes + liquidity before going live")
+    prt.add_argument("--all", action="store_true", help="check the full eligible set, not just the book")
+    prt.add_argument("--live-probe", action="store_true",
+                     help="additionally run TWAK quote-only swaps to confirm real on-DEX routes")
+    prt.set_defaults(func=cmd_routes)
 
     sub.add_parser("dashboard", help="launch the public dashboard").set_defaults(func=cmd_dashboard)
     return p

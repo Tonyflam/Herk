@@ -211,6 +211,12 @@ class Agent:
         self.portfolio.roll_day(now, prices)
         self.portfolio.update_marks(prices)
 
+        actions: list[Action] = []
+        # Live scoring is from on-chain balances — reconcile (and optionally mark)
+        # the book against what the wallet actually holds before sizing posture.
+        if not dry_run:
+            self._reconcile_onchain(prices, actions)
+
         posture = self.meta.assess(
             now=now,
             equity=self.portfolio.equity(prices),
@@ -219,7 +225,6 @@ class Agent:
             regime_gross_scale=snap.regime.gross_scale,
         )
 
-        actions: list[Action] = []
         self.ledger.append("signal", {
             "profile": s.profile,
             "top": [(x.symbol, round(x.composite, 3)) for x in snap.top(s.signals.top_n)],
@@ -404,6 +409,78 @@ class Agent:
             except Exception as e:
                 last_err = f"{type(e).__name__}: {e}"
         return None, last_err
+
+    # ------------------------------------------------- on-chain reconciliation
+    def _reconcile_onchain(self, prices, actions) -> None:
+        """Reconcile the booked book against actual on-chain balances.
+
+        The competition scores from on-chain holdings, so in live mode HELM marks
+        itself the same way: drift between booked quantity and the wallet's real
+        balance (gas spent, slippage vs. model, dust, partial fills) is logged,
+        and — when ``scoring.mark_from_onchain`` — the book is corrected to chain.
+        Best-effort: any failure degrades to the booked mark and never raises.
+        """
+        s = self.settings
+        if not s.is_live or not s.scoring.mark_from_onchain:
+            return
+        try:
+            from .data import onchain
+        except Exception:
+            return
+        wallet = onchain.resolve_wallet(s)
+        if not wallet:
+            self.ledger.append("alert", {"reason": "onchain_reconcile",
+                                         "detail": "no wallet address resolved"})
+            return
+
+        held = list(self.portfolio.positions)
+        base = s.capital.base_currency
+        try:
+            holdings = onchain.wallet_holdings(s, wallet, [*held, base])
+        except Exception as e:
+            self.ledger.append("alert", {"reason": "onchain_reconcile",
+                                         "detail": f"read failed: {type(e).__name__}"})
+            return
+
+        tol = max(0.0, s.scoring.onchain_drift_alert_pct) / 100.0
+        drifts: list[dict] = []
+
+        # Cash leg (base currency) → portfolio.cash.
+        base_h = holdings.get(base)
+        if base_h and base_h.ok:
+            booked = self.portfolio.cash
+            chain = base_h.units
+            if booked <= 0 or abs(chain - booked) / max(abs(booked), 1e-9) > tol:
+                drifts.append({"sym": base, "booked": round(booked, 4),
+                               "chain": round(chain, 4)})
+            if s.scoring.mark_from_onchain:
+                self.portfolio.cash = chain
+
+        # Position legs → position.qty.
+        for sym in held:
+            h = holdings.get(sym)
+            pos = self.portfolio.positions.get(sym)
+            if not pos or not h or not h.ok:
+                continue
+            booked = pos.qty
+            chain = h.units
+            if booked <= 0 or abs(chain - booked) / max(abs(booked), 1e-9) > tol:
+                drifts.append({"sym": sym, "booked": round(booked, 8),
+                               "chain": round(chain, 8)})
+            if s.scoring.mark_from_onchain:
+                if chain <= 1e-12:
+                    del self.portfolio.positions[sym]
+                else:
+                    pos.qty = chain
+
+        if drifts:
+            self.ledger.append("reconcile", {"wallet": wallet[:10] + "…",
+                                             "drifts": drifts[:8],
+                                             "marked": s.scoring.mark_from_onchain})
+            if actions is not None:
+                actions.append(Action("reconcile", "on-chain",
+                                      f"{len(drifts)} drift(s) vs chain"
+                                      + (" — marked to chain" if s.scoring.mark_from_onchain else "")))
 
     # ----------------------------------------------------------------- loops
     def close(self) -> None:

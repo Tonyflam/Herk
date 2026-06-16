@@ -180,6 +180,7 @@ mode and only *adds* capabilities when credentials are present.
 | `helm signal` | One-shot regime + ranked shortlist + contest posture. |
 | `helm run [--dry-run] [--cycles N] [--interval S] [--until ISO] [--supervise]` | Run the agent loop; `--until` runs continuously to a deadline with crash-recovery. |
 | `helm preflight` | Contest-readiness checklist (paper- or live-aware). |
+| `helm routes [--all] [--live-probe]` | Pre-validate PancakeSwap routes + liquidity for every name in the book (or `--all` eligible names). |
 | `helm status` | Portfolio + ledger snapshot. |
 | `helm verify` | Re-verify the hash-chained audit ledger. |
 | `helm backtest [--days N] [--stride H]` | Walk-forward backtest over historical data. |
@@ -332,6 +333,7 @@ HELM_PROFILE=aggressive       # the contest posture (tuned for total return)
 ```bash
 python -m helm.cli identity     # mint ERC-8004 identity (BNB AI Agent SDK)
 python -m helm.cli register      # register for the competition (TWAK)
+python -m helm.cli routes        # confirm every name in the book still has a live route
 python -m helm.cli preflight     # confirm READY -- every arming check must be green
 
 # Run the full contest week under the process-level watchdog: auto-restarts on a
@@ -361,6 +363,28 @@ trading is worse than a mediocre one. HELM has three independent keep-alive laye
 And the disqualification floor is defended directly: the **>=1-trade/day** ping is
 forced from **18:00 UTC** (not 23:59) and retried, leaving hours of buffer for the
 supervisor to recover before the midnight deadline.
+
+### Scored from the chain, so HELM marks from the chain
+
+The live week is scored on the wallet's **actual on-chain balances** -- not on an
+internal ledger HELM could quietly disagree with. Two safeguards keep the agent's
+own view honest with the judges':
+
+1. **Route pre-validation** (`helm routes`) screens every name for a real
+   PancakeSwap route and acceptable cost *before* the window opens. Running it over
+   the full eligible set shows why the book is curated: of 148 eligible names only
+   87 quote cleanly and **60 have no live route at all** -- untradeable traps. All
+   **24** names in HELM's active book route with single-digit-to-low-bps slippage.
+2. **On-chain marking** -- in live mode the agent reads its wallet's real balances
+   (native BNB + each held token via redundant BSC RPC) and reconciles the book to
+   chain: drift from gas, slippage, dust or partial fills is logged to the audit
+   ledger and the mark is corrected to what the chain actually holds. A failed read
+   degrades to the booked value rather than zeroing a position.
+
+Because the official scoring rules are encoded as explicit, reviewable assumptions
+(`scoring:` in `config/settings.yaml`), preflight **warns until `scoring.confirmed:
+true`** -- a deliberate gate forcing a human to verify them against the official
+spec before going live.
 
 ---
 

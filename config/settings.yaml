@@ -115,6 +115,18 @@ execution:
   x402_on_buys: true                     # pay ~$0.01 for fresh DEX data before each buy
   quote_only_dry_run: true               # in dry-run, request live quotes but never broadcast
   bsc_rpc_urls: []                        # redundant BSC RPC failover; empty = built-in public defaults
+  wallet_address: ""                     # on-chain balance-read wallet; empty = resolve from identity
+  token_addresses: {}                     # SYM -> BEP-20 address overrides for on-chain marking
+
+scoring:
+  # Competition scoring assumptions HELM encodes. CONFIRM against the official
+  # BNB Hack rules, then set confirmed: true (preflight warns until you do).
+  min_hold_usd_per_hour: 1.0             # an hour holding < this in eligible value scores 0%
+  must_hold_in_scope: true               # only eligible-set holdings count; never park out of scope
+  mark_from_onchain: true                # live: mark equity from real on-chain balances (score-truthful)
+  onchain_drift_alert_pct: 2.0           # ledger-alert when booked vs on-chain holdings drift past this
+  rules_url: ""                          # link to official rules (for the record)
+  confirmed: false                       # flip true once verified against the official spec
 
 identity:
   register_erc8004: false                # set true to register on-chain agent identity

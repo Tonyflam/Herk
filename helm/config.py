@@ -129,12 +129,41 @@ class ExecutionCfg:
     # public defaults in helm/data/rpc.py. A single RPC going down must never
     # blind the agent during the live week.
     bsc_rpc_urls: list[str] = field(default_factory=list)
+    # Optional wallet address override for on-chain balance reads. Empty = resolve
+    # from the saved ERC-8004 identity (data/runtime/identity.json) or TWAK.
+    wallet_address: str = ""
+    # Symbol -> BEP-20 contract address overrides for on-chain marking. The
+    # built-in registry (helm/data/onchain.py) covers the high-confidence cash
+    # leg + blue chips; supply the rest here (authoritative, e.g. from TWAK).
+    token_addresses: dict = field(default_factory=dict)
 
 
 @dataclass
 class IdentityCfg:
     register_erc8004: bool = False
     network: str = "bsc-testnet"
+
+
+@dataclass
+class ScoringCfg:
+    """Competition scoring assumptions HELM encodes. CONFIRM these against the
+    official BNB Hack rules and set ``confirmed: true`` once verified — preflight
+    warns until then. The live week is scored from on-chain balances, so HELM
+    marks from chain (see ScoringCfg.mark_from_onchain) to match the judges' view.
+    """
+
+    # An hour is scored 0% if the wallet holds less than this in eligible value.
+    min_hold_usd_per_hour: float = 1.0
+    # Only holdings in the eligible set count; never park value out of scope.
+    must_hold_in_scope: bool = True
+    # In live mode, mark equity from actual on-chain balances (score-truthful)
+    # rather than HELM's booked quantity.
+    mark_from_onchain: bool = True
+    # Log a ledger alert when booked vs on-chain holdings drift beyond this.
+    onchain_drift_alert_pct: float = 2.0
+    # Optional link to the official rules; user confirms then flips ``confirmed``.
+    rules_url: str = ""
+    confirmed: bool = False
 
 
 @dataclass
@@ -189,6 +218,7 @@ class Settings:
     execution: ExecutionCfg = field(default_factory=ExecutionCfg)
     identity: IdentityCfg = field(default_factory=IdentityCfg)
     dashboard: DashboardCfg = field(default_factory=DashboardCfg)
+    scoring: ScoringCfg = field(default_factory=ScoringCfg)
     secrets: Secrets = field(default_factory=Secrets)
 
     @property
