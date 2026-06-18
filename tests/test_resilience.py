@@ -148,6 +148,45 @@ def test_daily_floor_fires_after_deadline(tmp_path):
         agent.close()
 
 
+def test_daily_floor_fires_even_when_halted(tmp_path):
+    """The automatic drawdown halt must NOT suppress the >=1-trade/day floor.
+
+    If the book draws down to the internal halt line and parks in cash, the halt
+    persists (drawdown is measured from peak). Gating the floor on it would skip
+    the compliance ping every subsequent day and walk us into a trade-count DQ —
+    while still below the 30% drawdown gate and potentially recoverable. The dust
+    ping adds negligible risk, so it must still fire. Only the manual kill-switch
+    may suppress it."""
+    agent = _fresh_agent(tmp_path)
+    try:
+        agent.settings.contest.min_trade_deadline_hour = 18
+        after = datetime(2026, 6, 23, 19, 0, tzinfo=timezone.utc)
+        halted = SimpleNamespace(halt_new_risk=True)
+        actions: list = []
+        agent._ensure_min_trade(after, _fake_snap(), {}, halted, actions, dry_run=False)
+        assert agent.portfolio.trades_today == 1
+        ping = next(a for a in actions if a.kind == "compliance")
+        assert "under halt" in ping.detail
+    finally:
+        agent.close()
+
+
+def test_daily_floor_suppressed_by_kill_switch(tmp_path):
+    """The manual kill-switch is an explicit human STOP and DOES suppress the
+    floor — even past the deadline — so an operator can halt the agent."""
+    agent = _fresh_agent(tmp_path)
+    try:
+        agent.settings.contest.min_trade_deadline_hour = 18
+        after = datetime(2026, 6, 23, 19, 0, tzinfo=timezone.utc)
+        agent.sentinel.kill_switch_engaged = lambda: True  # type: ignore[assignment]
+        actions: list = []
+        agent._ensure_min_trade(after, _fake_snap(), {}, _POSTURE, actions, dry_run=False)
+        assert agent.portfolio.trades_today == 0
+        assert not any(a.kind == "compliance" for a in actions)
+    finally:
+        agent.close()
+
+
 # --------------------------------------------------------- executor retry
 def test_execute_with_retry_gives_up_after_attempts(tmp_path):
     agent = _fresh_agent(tmp_path)

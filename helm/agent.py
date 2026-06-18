@@ -429,10 +429,16 @@ class Agent:
     # ------------------------------------------------- min daily trade floor
     def _ensure_min_trade(self, now, snap, prices, posture, actions, dry_run) -> None:
         s = self.settings
-        if not s.contest.enabled or posture.halt_new_risk:
+        if not s.contest.enabled:
             return
         if self.portfolio.trades_today >= s.contest.min_trades_per_day:
             return
+        # The manual kill-switch is an explicit human STOP — honor it even at the
+        # cost of the floor. But the *automatic* drawdown halt (posture.halt_new_risk)
+        # must NOT suppress this ping: a dust-sized compliance trade adds negligible
+        # risk, whereas missing the >=1-trade/day floor is an instant, irreversible
+        # disqualification. So at the halt line we still satisfy the trade-count rule
+        # without adding real exposure — exactly what the dust ping does.
         if self.sentinel.kill_switch_engaged():
             return
         # Guarantee the floor early in the UTC day (default 18:00, not 23:59) so a
@@ -448,9 +454,11 @@ class Agent:
                                          "detail": "no eligible candidate (will retry next cycle)"})
             actions.append(Action("blocked", "—", "daily-floor: no eligible candidate"))
             return
+        halted = bool(getattr(posture, "halt_new_risk", False))
         notional = max(s.contest.dust_floor_usd * 2, 0.0)
         if dry_run:
-            actions.append(Action("compliance", cand.symbol, f"would ping ${notional:.2f}"))
+            tag = " [under halt]" if halted else ""
+            actions.append(Action("compliance", cand.symbol, f"would ping ${notional:.2f}{tag}"))
             return
         order = Order(cand.symbol, "buy", ref_price=cand.price, notional_usd=notional,
                       liquidity_usd=cand.liquidity_usd, reason="min_daily_trade")
@@ -468,8 +476,10 @@ class Agent:
         tp = cand.price + (cand.atr * s.risk.take_profit_atr_mult if cand.atr > 0 else cand.price * 0.1)
         self.portfolio.apply_buy(fill, max(0.0, stop), tp,
                                  cand.atr * s.risk.stop_loss_atr_mult if cand.atr > 0 else cand.price * 0.06)
-        self.ledger.append("trade", {**asdict(fill), "reason": "min_daily_trade"})
-        actions.append(Action("compliance", cand.symbol, f"daily-floor ping ${fill.notional_usd:.2f}"))
+        self.ledger.append("trade", {**asdict(fill), "reason": "min_daily_trade",
+                                     "under_halt": halted})
+        tag = " [under halt]" if halted else ""
+        actions.append(Action("compliance", cand.symbol, f"daily-floor ping ${fill.notional_usd:.2f}{tag}"))
 
     def _execute_with_retry(self, order, attempts: int):
         """Execute an order, retrying on exception or a non-filled result.
