@@ -181,15 +181,22 @@ profiles:
   # the meta-controller's convex drawdown taper still cuts exposure before the gate.
   #
   # *** THIS IS THE CONTEST PROFILE (set HELM_PROFILE=max for the live week). ***
-  # Validated 2026-06-16 across 6 historical windows + the full neutral window:
-  # Pareto-dominant for the return-ranked, winner-take-all prize. In up-weeks it
-  # captured +11..+21% vs `aggressive`'s ~0% (cross-sectional rotation is ~market-
-  # neutral, so aggressive cedes a return race); in down-weeks it is only ~1pt
-  # worse, with worst realized drawdown 18% — well under the 28% halt / 30% DQ.
-  # The top_n=2 @ 50% concentration removes the churning 3rd-slot rotation that
-  # whipsawed `aggressive` (25-29% -> 50-71% win-rate, fewer trades, less gas).
-  # Single-name risk is bounded: the curated book is liquid majors only (no
-  # rug-prone micro-caps) and Sentinel pre-trade checks run on every live entry.
+  # Retuned 2026-06-20 across 88 windows x 4 regime anchors (current / Nov-24 bull /
+  # Aug-24 crash / Feb-25 selloff), 7-day contest clock, true 30% DQ gate:
+  # Pareto-dominant for the return-ranked, winner-take-all prize. Single-name
+  # concentration (top_n=1) TRIPLES the rate of tournament-winning (>=15%) weeks
+  # vs the prior top_n=2 book (2% -> 7%) and lifts the ceiling +24% -> +32%, while
+  # *lowering* realized drawdown (16.9% vs 17.8%) and improving the worst week.
+  # Mechanism (not overfit): vol-targeting equalizes each name's risk budget, so
+  # the #1 relative-strength leader is the highest-conviction bet; a 2nd name just
+  # dilutes toward the mean and doubles churn/gas. Same effect we already saw 3->2.
+  # The 20% cash buffer (max_position_pct 0.80) is near-free DQ insurance: it costs
+  # ~2pt at the p95 tail but raises the single-name gap-to-DQ threshold from a 31%
+  # to a 37.5% instant move — roughly halving the one risk the backtest can't see
+  # (a hack/depeg on the held name). Cranking target_vol is a DEAD lever here
+  # (1.2 == 1.6 identical; max_position_pct binds first). Single-name risk further
+  # bounded: curated book is liquid majors only (no rug-prone micro-caps) and
+  # Sentinel pre-trade checks run on every live entry; the daily-floor still fires.
   max:
     contest:
       halt_drawdown_pct: 28.0
@@ -199,13 +206,13 @@ profiles:
     risk:
       target_portfolio_vol_annual: 1.20
       max_gross_exposure: 0.99
-      max_position_pct: 0.50              # 2 names
+      max_position_pct: 0.80              # single leader + ~20% cash buffer (gap-to-DQ insurance)
       daily_loss_limit_pct: 20.0
       per_trade_risk_pct: 5.0
       take_profit_atr_mult: 8.0
     signals:
       min_composite_score: 0.06
-      top_n: 2
+      top_n: 1                            # hold only the #1 relative-strength leader (fattest right tail)
     regime:
       risk_off_gross_scale: 0.80
       overlay_dd_gate_floor: 0.25
