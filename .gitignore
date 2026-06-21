@@ -34,3 +34,7 @@ data/runtime/
 Thumbs.db
 .idea/
 .vscode/
+
+# --- Local hackathon research / private notes (NEVER commit) ---
+HACKATHON_BUIDLS*.md
+messages.html
