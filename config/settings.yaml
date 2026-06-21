@@ -121,7 +121,7 @@ execution:
   x402_on_buys: true                     # pay ~$0.01 for fresh DEX data before each buy
   quote_only_dry_run: true               # in dry-run, request live quotes but never broadcast
   bsc_rpc_urls: []                        # redundant BSC RPC failover; empty = built-in public defaults
-  wallet_address: ""                     # on-chain balance-read wallet; empty = resolve from identity
+  wallet_address: "0x2d8d17a72c8462AdbF1538Bfe03F5f2AaACb471A"  # TWAK trading wallet (holds funds); live reconcile + scoring read this. Override with HELM_WALLET_ADDRESS.
   token_addresses: {}                     # SYM -> BEP-20 address overrides for on-chain marking
 
 scoring:

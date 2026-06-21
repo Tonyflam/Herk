@@ -372,4 +372,11 @@ def load_settings(path: str | Path | None = None) -> Settings:
     s.mode = os.getenv("HELM_MODE", s.mode)
     if os.getenv("HELM_EXECUTION_ADAPTER"):
         s.execution.adapter = os.environ["HELM_EXECUTION_ADAPTER"]
+    if os.getenv("HELM_WALLET_ADDRESS"):
+        s.execution.wallet_address = os.environ["HELM_WALLET_ADDRESS"].strip()
+    if os.getenv("HELM_QUOTE_ONLY") is not None:
+        # Final broadcast gate. Default (unset) keeps the settings.yaml value.
+        # Set HELM_QUOTE_ONLY=0 at arming so live swaps actually broadcast.
+        s.execution.quote_only_dry_run = _env_bool(
+            "HELM_QUOTE_ONLY", s.execution.quote_only_dry_run)
     return s
