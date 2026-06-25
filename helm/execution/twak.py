@@ -21,6 +21,7 @@ when actually asked to act live.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -234,7 +235,11 @@ class TwakAdapter(ExecutionAdapter):
             amount = f"{order.notional_usd:.6f}"
             from_asset, to_asset = self.base_asset, alt
         else:
-            amount = f"{order.qty:.8f}"
+            # Truncate (round DOWN) to 8 dp. A half-up round of a full-position
+            # sell can request ~1e-9 MORE than the on-chain balance and revert
+            # the swap ("transfer amount exceeds balance"); truncation is always
+            # <= the held balance, leaving at most sub-cent dust.
+            amount = f"{math.floor(order.qty * 1e8) / 1e8:.8f}"
             from_asset, to_asset = alt, self.base_asset
             # Source leg is the alt (by address); pin its decimals so the CLI
             # parses the sell amount correctly (DOGE is 8 dp; other majors 18).
@@ -253,8 +258,11 @@ class TwakAdapter(ExecutionAdapter):
         )
 
         if not res.ok:
+            # Surface the real CLI error (stderr/stdout) so a live failure is
+            # diagnosable from the ledger/logs instead of a bare "non-zero exit".
+            detail = " ".join((res.stderr or res.stdout or res.note or "swap failed").split())[:160]
             return Fill(order.symbol, order.side, 0, order.ref_price, 0, 0, est_slip,
-                        _now_iso(), "twak", False, res.note or "swap failed")
+                        _now_iso(), "twak", False, detail)
 
         fill = self._parse_swap(res, order, est_slip)
         fill.note = "quote-only (simulated)" if quote_only else "live swap"
