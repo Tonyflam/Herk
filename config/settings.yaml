@@ -69,6 +69,18 @@ risk:
                                      # overrides it with the real receipt gas when it can read one.
   gas_max_pct_of_notional: 0.015     # reject a swap whose gas exceeds this fraction of its notional
                                      # (gas-aware dust floor: min trade = gas / this, ~$20 at defaults).
+  # --- Leader rotation: recycle dead capital into the engine's current #1 ----
+  # Momentum decays. A name bought days ago can fall out of the ranked shortlist
+  # while still hogging the book, starving the live leader of capital. Rotation
+  # sells that dead weight into the leader so capital always follows conviction.
+  # Hysteresis (edge + min-hold + min size + one/cycle) stops it thrashing.
+  rotation_enabled: true
+  rotation_min_edge: 0.40            # leader composite must beat the stale name by >= this (z-score pts)
+  rotation_min_hold_hours: 4.0       # never rotate a position younger than this (anti-whipsaw)
+  rotation_cash_floor_usd: 15.0      # fire when deployable cash drops below this (capital-constrained)
+  rotation_big_holding_frac: 0.45    # ...OR when a stale holding is >= this fraction of equity (regime change)
+  rotation_min_stale_usd: 10.0       # never rotate a holding smaller than this (gas would dominate)
+  rotation_topup_frac: 0.85          # treat the leader as underfunded if held below this x its max weight
 
 # ---------------------------------------------------------------------------
 # SIGNALS — cross-sectional momentum / relative strength + vol.
@@ -112,7 +124,7 @@ data:
 universe:
   use_curated_tradeable: true            # trade liquid majors subset, not all 149
   extra_tradeable: []                    # add eligible symbols to widen the book
-  exclude: []                            # force-exclude symbols
+  exclude: [ETC, PENDLE, COMP, SUSHI, APE, SNX, FET, LDO]   # no verified deep-liquidity USDT route on BSC -> keep engine from ranking an unbuyable #1
 
 execution:
   adapter: paper                         # paper | twak
@@ -122,7 +134,27 @@ execution:
   quote_only_dry_run: true               # in dry-run, request live quotes but never broadcast
   bsc_rpc_urls: []                        # redundant BSC RPC failover; empty = built-in public defaults
   wallet_address: "0x2d8d17a72c8462AdbF1538Bfe03F5f2AaACb471A"  # TWAK trading wallet (holds funds); live reconcile + scoring read this. Override with HELM_WALLET_ADDRESS.
-  token_addresses: {}                     # SYM -> BEP-20 address overrides for on-chain marking
+  # SYM -> canonical Binance-Peg BEP-20 address. Each VERIFIED on-chain via
+  # symbol()/decimals() 2026-06-25 before live use. Without these the executor
+  # cannot swap (or SELL a held name) -> idle cash can't deploy + a stop can't
+  # exit. DOGE is 8-decimals (handled in twak.py); all others 18.
+  token_addresses:
+    ETH:  "0x2170Ed0880ac9A755fd29B2688956BD959F933F8"
+    CAKE: "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82"
+    AAVE: "0xfb6115445Bff7b52FeB98650C87f44907E58f802"
+    AVAX: "0x1CE0c2827e2eF14D5C4f29a091d735A204794041"
+    UNI:  "0xBf5140A22578168FD562DCcF235E5D43A02ce9B1"
+    LINK: "0xF8A0BF9cF54Bb92F17374d9e9A321E6a111a51bD"
+    DOT:  "0x7083609fCE4d1d8Dc0C979AAb8c869Ea2C873402"
+    XRP:  "0x1D2F0da169ceB9fC7B3144628dB156f3F6c60dBE"
+    ADA:  "0x3EE2200Efb3400fAbB9AacF31297cBdD1d435D47"
+    LTC:  "0x4338665CBB7B2485A8855A139b75D5e34AB0DB94"
+    BCH:  "0x8fF795a6F4D97E7887C79beA79aba5cc76444aDf"
+    ATOM: "0x0Eb3a705fc54725037CC9e008bDede697f62F335"
+    DOGE: "0xbA2aE424d960c26247Dd6c32edC70B295c744C43"
+    FIL:  "0x0D8Ce2A99Bb6e3B7Db580eD848240e4a0F9aE153"
+    INJ:  "0xa2B726B1145A4773F68593CF171187d8EBe4d495"
+    TWT:  "0x4B0F1812e5Df2A09796481Ff14017e6005508003"
 
 scoring:
   # Competition scoring assumptions HELM encodes. CONFIRM against the official
@@ -205,8 +237,13 @@ profiles:
       endgame_escalate_dd_budget_min: 0.4  # escalate with a touch less budget in last-resort mode
     risk:
       target_portfolio_vol_annual: 1.20
-      max_gross_exposure: 0.99
-      max_position_pct: 0.80              # single leader + ~20% cash buffer (gap-to-DQ insurance)
+      # Endgame full-deployment: >1.0 intentionally targets ~100% deployed so idle
+      # cash is put to work in the #1 leader instead of sitting out the final push.
+      # This is NOT leverage (spot only) and the agent never orders past actual
+      # USDT (cash cap in _run_entries). The convex SURVIVAL drawdown taper still
+      # collapses gross as we approach the halt line, so the 30% DQ gate is intact.
+      max_gross_exposure: 1.40
+      max_position_pct: 0.80              # per-name cap keeps a single-name gap-to-DQ cushion
       daily_loss_limit_pct: 20.0
       per_trade_risk_pct: 5.0
       take_profit_atr_mult: 8.0
@@ -214,6 +251,6 @@ profiles:
       min_composite_score: 0.06
       top_n: 1                            # hold only the #1 relative-strength leader (fattest right tail)
     regime:
-      risk_off_gross_scale: 0.80
-      overlay_dd_gate_floor: 0.25
+      risk_off_gross_scale: 0.99          # stay fully deployed through fear in the endgame (was 0.80)
+      overlay_dd_gate_floor: 0.10         # apply little of the risk-off cut while DD budget is healthy
 

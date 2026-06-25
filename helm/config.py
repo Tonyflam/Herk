@@ -88,6 +88,20 @@ class RiskCfg:
     # scales up if gas rises, and is inert on a properly-funded book. Protects a
     # small book from death-by-gas (a $1 trade paying $0.30 gas loses 30%).
     gas_max_pct_of_notional: float = 0.015
+    # --- Leader rotation (capital recycling) ------------------------------
+    # Momentum decays: a name bought days ago can fall out of the ranked
+    # shortlist while still holding most of the book, starving the current
+    # leader of fresh capital (we are nearly fully invested, so entries have no
+    # cash). Rotation sells such dead weight into the leader, with strict
+    # hysteresis so it never thrashes. Stops, DQ taper, Sentinel and the
+    # min-hold guard all still apply.
+    rotation_enabled: bool = True
+    rotation_min_edge: float = 0.40          # leader composite must beat the stale name by >= this
+    rotation_min_hold_hours: float = 4.0     # never rotate a position younger than this
+    rotation_cash_floor_usd: float = 15.0    # "capital-constrained" trigger: free cash below this
+    rotation_big_holding_frac: float = 0.45  # OR the stale name is >= this fraction of equity
+    rotation_min_stale_usd: float = 10.0     # never rotate a holding smaller than this (gas-inefficient)
+    rotation_topup_frac: float = 0.85        # leader is "underfunded" if held < this x its max target
 
 
 @dataclass

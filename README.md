@@ -354,7 +354,7 @@ python -m helm.cli preflight     # confirm READY -- every arming check must be g
 
 # Run the full contest week under the process-level watchdog: auto-restarts on a
 # hard crash and resumes from the last on-disk checkpoint (no loss, no double-trade).
-bash scripts/run_live.sh 2026-06-28T12:00:00Z 3600   # END_UTC, interval seconds
+bash scripts/run_live.sh 2026-06-29T00:00:00Z 3600   # END_UTC, interval seconds
 ```
 
 Live swaps still pass through Sentinel + the on-chain security checklist, and

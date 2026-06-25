@@ -1,0 +1,32 @@
+# Keep the Docker build context clean AND keep secrets OUT of the image.
+# Every secret reaches the container at runtime via Railway env vars only.
+
+# --- secrets (NEVER bake these in) -----------------------------------------
+.env
+.env.*
+!.env.example
+**/keystore/
+data/runtime/keystore/
+
+# --- local runtime state / logs (Railway uses a persistent Volume instead) --
+data/runtime/state.json
+data/runtime/snapshot.json
+data/runtime/audit.jsonl
+data/runtime/live_run.log
+data/runtime/routes.json
+data/runtime/archive_*/
+data/runtime/.ensure_live.lock
+
+# --- python / node / vcs cruft ---------------------------------------------
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.gitignore
+node_modules/
+
+# --- editor / OS -----------------------------------------------------------
+.vscode/
+.DS_Store
+*.swp

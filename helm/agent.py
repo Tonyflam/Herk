@@ -240,6 +240,7 @@ class Agent:
 
         self._run_exits(prices, actions, dry_run)
         if not posture.halt_new_risk and not self.sentinel.kill_switch_engaged():
+            self._run_rotation(snap, prices, posture, actions, dry_run, now)
             self._run_entries(snap, prices, posture, actions, dry_run, now)
         self._ensure_min_trade(now, snap, prices, posture, actions, dry_run)
 
@@ -347,6 +348,109 @@ class Agent:
         })
         return use_price
 
+    # ------------------------------------------------------------- rotation
+    def _position_age_hours(self, pos: Position, now: datetime) -> float:
+        """Hours since a position was opened; unparseable timestamps read as old."""
+        try:
+            ts = datetime.fromisoformat(pos.entry_ts)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return max(0.0, (now - ts).total_seconds() / 3600.0)
+        except Exception:
+            return 1e9
+
+    def _run_rotation(self, snap: SignalSnapshot, prices, posture, actions, dry_run, now) -> None:
+        """Recycle dead-weight capital into the engine's current leader.
+
+        Momentum decays: a name bought days ago can drop out of the ranked
+        shortlist while still holding most of the book, starving the live leader
+        of capital (we are nearly fully invested, so ``_run_entries`` has no cash
+        to deploy). This sells the worst such holding -- one the engine no longer
+        ranks and that the leader dominates by a clear margin -- so the same
+        cycle's entry step funds the leader. It fires only when we are either
+        capital-constrained or sitting on a large stale chunk. Strict hysteresis
+        (composite edge + min-hold + min size + one rotation per cycle) prevents
+        thrashing or chasing noise. Stops/TP run first in ``_run_exits``; the DQ
+        taper still governs how much of the freed cash gets redeployed.
+        """
+        s = self.settings
+        rc = s.risk
+        if not getattr(rc, "rotation_enabled", True) or not self.portfolio.positions:
+            return
+        ranked = snap.top(s.signals.top_n)
+        if not ranked:
+            return
+        equity = self.portfolio.equity(prices)
+        if equity <= 0:
+            return
+        top_syms = {x.symbol for x in ranked}
+
+        # Leader = best ranked name we don't yet hold at/near its target weight.
+        target_usd = rc.max_position_pct * equity
+        leader = None
+        for sig in ranked:
+            held = self.portfolio.positions.get(sig.symbol)
+            if held is None:
+                leader = sig
+                break
+            held_val = held.qty * prices.get(sig.symbol, held.avg_entry)
+            if held_val < target_usd * rc.rotation_topup_frac:
+                leader = sig
+                break
+        if leader is None:
+            return
+
+        constrained = self.portfolio.cash < rc.rotation_cash_floor_usd
+        comp = {x.symbol: x.composite for x in snap.signals}
+
+        # Stale candidates: held, NOT ranked, beaten by the leader by >= the
+        # hysteresis edge, old enough, and worth the gas. A candidate qualifies
+        # when we're cash-constrained OR it is itself a large stale chunk.
+        cands: list[tuple[float, float, str, Position]] = []
+        for sym, pos in self.portfolio.positions.items():
+            if sym in top_syms or sym == leader.symbol:
+                continue
+            held_val = pos.qty * prices.get(sym, pos.avg_entry)
+            if held_val < rc.rotation_min_stale_usd:
+                continue
+            big = held_val >= rc.rotation_big_holding_frac * equity
+            if not (constrained or big):
+                continue
+            if self._position_age_hours(pos, now) < rc.rotation_min_hold_hours:
+                continue
+            edge = leader.composite - comp.get(sym, -999.0)
+            if edge < rc.rotation_min_edge:
+                continue
+            cands.append((edge, held_val, sym, pos))
+        if not cands:
+            return
+
+        # Rotate the single strongest disagreement (largest edge) this cycle.
+        cands.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        edge, held_val, sym, pos = cands[0]
+        ref = prices.get(sym, pos.avg_entry)
+        dec = self.sentinel.pre_exit(symbol=sym, qty=pos.qty, held_qty=pos.qty)
+        if not dec.approved:
+            return
+        if dry_run:
+            actions.append(Action("dry_run", sym,
+                f"would rotate -> {leader.symbol} (edge {edge:.2f}, ${held_val:.2f})"))
+            return
+        order = Order(sym, "sell", ref_price=ref, qty=pos.qty,
+                      liquidity_usd=1e9, reason="rotation")
+        fill = self.executor.execute(order)
+        if not fill.ok or fill.qty <= 0:
+            self.ledger.append("alert", {"reason": "rotation_unfilled",
+                                          "symbol": sym, "note": fill.note[:80]})
+            actions.append(Action("blocked", sym, f"rotation unfilled: {fill.note[:60]}"))
+            return
+        realized = self.portfolio.apply_sell(fill)
+        self.ledger.append("trade", {**asdict(fill), "reason": "rotation",
+                                      "realized_pnl": round(realized, 4),
+                                      "into": leader.symbol})
+        actions.append(Action("exit", sym,
+            f"rotate->{leader.symbol} @ {fill.price:.4f} pnl {realized:+.2f}"))
+
     # -------------------------------------------------------------- entries
     def _run_entries(self, snap: SignalSnapshot, prices, posture, actions, dry_run, now) -> None:
         s = self.settings
@@ -358,11 +462,32 @@ class Agent:
         # we fill above mid); avoids off-by-epsilon rejections at the boundary.
         reserve = 0.01 * gross_cap_usd
         for sig in snap.top(s.signals.top_n):
-            if sig.symbol in self.portfolio.positions:
-                continue
+            held = self.portfolio.positions.get(sig.symbol)
             headroom = gross_cap_usd - start_gross - consumed - reserve
+            # Never order past the USDT we actually hold. The endgame profile's
+            # gross cap can exceed 1.0 to force full deployment of idle cash into
+            # the leader; without this a single entry could size beyond our cash
+            # and revert on-chain (burning gas). In live, cash is already debited
+            # by prior fills this cycle; in dry-run we net the hypothetical spend.
+            cash_on_hand = self.portfolio.cash - (consumed if dry_run else 0.0)
+            headroom = min(headroom, cash_on_hand - max(reserve, s.risk.gas_usd_per_swap))
             if headroom < s.contest.dust_floor_usd:
                 break
+            if held is not None:
+                # Already hold this ranked name: top it up toward its target
+                # weight, never beyond max_position_pct. This is how the cash
+                # freed by rotation pyramids into the leader (the leader is
+                # usually already a position, and entries would otherwise only
+                # ever OPEN new names). Skip when the remaining room is below the
+                # gas-aware economic floor (Sentinel would reject it anyway) and
+                # try the next ranked name rather than stopping the whole loop.
+                held_val = held.qty * prices.get(sig.symbol, held.avg_entry)
+                topup_room = s.risk.max_position_pct * equity - held_val
+                gas_floor = (s.risk.gas_usd_per_swap / s.risk.gas_max_pct_of_notional
+                             if s.risk.gas_max_pct_of_notional > 0 else 0.0)
+                if topup_room < max(s.contest.dust_floor_usd, gas_floor):
+                    continue
+                headroom = min(headroom, topup_room)
             plan = plan_position(
                 symbol=sig.symbol, price=sig.price, atr=sig.atr, equity=equity,
                 per_trade_risk_pct=posture.per_trade_risk_pct,

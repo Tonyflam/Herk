@@ -11,7 +11,7 @@
 #
 # Usage:
 #   scripts/run_live.sh [END_UTC] [INTERVAL_SECONDS]
-#   scripts/run_live.sh 2026-06-28T12:00:00Z 3600
+#   scripts/run_live.sh 2026-06-29T00:00:00Z 3600
 #
 # Live trading still requires the two arming flags (HELM_EXECUTE_TRADES=1 and
 # HELM_EXECUTE_CHAIN=1) and HELM_MODE=live in .env — this script broadcasts
@@ -20,7 +20,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-END_UTC="${1:-2026-06-28T12:00:00Z}"
+END_UTC="${1:-2026-06-29T00:00:00Z}"
 INTERVAL="${2:-3600}"
 MAX_RESTARTS="${HELM_MAX_RESTARTS:-50}"
 BACKOFF=10          # seconds, grows on repeated fast failures

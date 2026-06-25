@@ -186,6 +186,32 @@ class TwakAdapter(ExecutionAdapter):
     def _quote_only(self) -> bool:
         return self.s.execution.quote_only_dry_run or not self._live_armed()
 
+    def _chain_name(self) -> str:
+        """TWAK CLI expects a chain *name*; map BSC chain_id 56 -> 'smartchain'.
+        The CLI default is 'ethereum', where this wallet holds nothing — omitting
+        this is why early live swaps failed with 'Unknown token ... on ethereum'.
+        """
+        return "smartchain" if self.s.execution.chain_id == 56 else str(self.s.execution.chain_id)
+
+    # Verified on-chain 2026-06-22: every curated BSC major is 18 dp except DOGE (8).
+    _ALT_DECIMALS = {"DOGE": 8}
+
+    def _token_decimals(self, sym: str) -> int:
+        return self._ALT_DECIMALS.get(sym.upper(), 18)
+
+    def _token_ref(self, sym: str) -> str | None:
+        """What the CLI should receive for a swap leg. The cash/base asset (USDT)
+        is passed by symbol (the CLI resolves it natively on smartchain); every
+        other symbol is passed by its canonical BSC contract address, because the
+        CLI does not know most alts by name on smartchain. Returns None for an
+        unknown alt so the caller refuses rather than misroutes.
+        """
+        if sym.upper() == self.base_asset.upper():
+            return self.base_asset
+        from ..data.onchain import token_meta
+        meta = token_meta(self.s, sym)
+        return meta[0] if meta else None
+
     def execute(self, order: Order) -> Fill:
         if not self.available:
             return Fill(order.symbol, order.side, 0, 0, 0, 0, 0, _now_iso(), "twak",
@@ -195,14 +221,27 @@ class TwakAdapter(ExecutionAdapter):
                         False, "no price")
 
         sym = order.symbol.upper()
+        alt = self._token_ref(sym)
+        if alt is None:
+            # No known BSC contract address: refuse rather than send an unroutable
+            # bare symbol the CLI would reject (or, worse, misroute on chain).
+            return Fill(order.symbol, order.side, 0, order.ref_price, 0, 0, 0,
+                        _now_iso(), "twak", False,
+                        f"no BSC contract address for {sym} (set execution.token_addresses)")
+
+        extra: list[str] = []
         if order.side == "buy":
             amount = f"{order.notional_usd:.6f}"
-            from_asset, to_asset = self.base_asset, sym
+            from_asset, to_asset = self.base_asset, alt
         else:
             amount = f"{order.qty:.8f}"
-            from_asset, to_asset = sym, self.base_asset
+            from_asset, to_asset = alt, self.base_asset
+            # Source leg is the alt (by address); pin its decimals so the CLI
+            # parses the sell amount correctly (DOGE is 8 dp; other majors 18).
+            extra += ["--decimals", str(self._token_decimals(sym))]
 
-        args = ["swap", amount, from_asset, to_asset, *self._pw()]
+        args = ["swap", amount, from_asset, to_asset,
+                "--chain", self._chain_name(), *extra, *self._pw()]
         quote_only = self._quote_only()
         if quote_only:
             args.append("--quote-only")
