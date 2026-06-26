@@ -212,6 +212,68 @@ def test_swing_dip_rebuy_waits_above_threshold(tmp_path, monkeypatch):
         agent.close()
 
 
+def test_swing_absolute_target_overrides_percentage(tmp_path, monkeypatch):
+    """HELM_SWING_REBUY_PX sets an absolute rebuy trigger above the -2% default."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    monkeypatch.setenv("HELM_SWING_REBUY_PX", "83.9")
+    agent = _agent(tmp_path)
+    try:
+        _book(agent, cash=50.0, positions=[])
+        agent.portfolio.swing_armed = True
+        agent.portfolio.swing_sell_px = 85.39          # -2% default would be ~83.68
+        prices = {"AAVE": 83.9}                         # at the absolute target
+        snap = _snap(ranked=[_sig("AAVE", 2.7, 83.9)])
+        actions: list = []
+        agent._run_swing(snap, prices, actions, dry_run=False, now=_NOW)
+
+        assert "AAVE" in agent.portfolio.positions      # rebought at the absolute target
+        assert agent.portfolio.swing_armed is False
+        assert any(a.kind == "entry" and "swing-rebuy" in a.detail for a in actions)
+    finally:
+        agent.close()
+
+
+def test_swing_absolute_target_waits_above_level(tmp_path, monkeypatch):
+    """With an absolute target set, a price still above it does NOT rebuy."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    monkeypatch.setenv("HELM_SWING_REBUY_PX", "83.9")
+    agent = _agent(tmp_path)
+    try:
+        _book(agent, cash=50.0, positions=[])
+        agent.portfolio.swing_armed = True
+        agent.portfolio.swing_sell_px = 85.39
+        prices = {"AAVE": 84.5}                         # above the 83.9 target
+        snap = _snap(ranked=[_sig("AAVE", 2.7, 84.5)])
+        actions: list = []
+        agent._run_swing(snap, prices, actions, dry_run=False, now=_NOW)
+
+        assert "AAVE" not in agent.portfolio.positions
+        assert agent.portfolio.swing_armed is True      # still waiting for 83.9
+        assert agent.portfolio.cash == 50.0
+    finally:
+        agent.close()
+
+
+def test_swing_garbage_target_falls_back_to_percentage(tmp_path, monkeypatch):
+    """A non-numeric HELM_SWING_REBUY_PX is ignored; the -2% default still works."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    monkeypatch.setenv("HELM_SWING_REBUY_PX", "not-a-number")
+    agent = _agent(tmp_path)
+    try:
+        _book(agent, cash=50.0, positions=[])
+        agent.portfolio.swing_armed = True
+        agent.portfolio.swing_sell_px = 100.0
+        prices = {"AAVE": 98.0}                         # exactly -2% default
+        snap = _snap(ranked=[_sig("AAVE", 2.7, 98.0)])
+        actions: list = []
+        agent._run_swing(snap, prices, actions, dry_run=False, now=_NOW)
+
+        assert "AAVE" in agent.portfolio.positions      # default percentage still fired
+        assert agent.portfolio.swing_armed is False
+    finally:
+        agent.close()
+
+
 def test_swing_off_command_disarms(tmp_path, monkeypatch):
     """``off`` clears the armed state without trading."""
     monkeypatch.setenv("HELM_SWING_CMD", "off#2")

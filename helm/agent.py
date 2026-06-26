@@ -362,11 +362,15 @@ class Agent:
         Lets a human fire a one-shot SELL of ``swing_symbol`` to cash via the
         ``HELM_SWING_CMD`` env var (``verb#token`` — ``sell`` / ``buy`` / ``off``),
         then auto-rebuys that name once it dips ``swing_rebuy_drop`` below the
-        realized sell price. Idempotent on the token, so a routine restart never
-        re-fires a stale command. While armed, ``_run_entries`` / ``_run_rotation``
-        are blocked from re-buying the name (the manual exit is not undone
-        underneath the operator). Every guardrail — Sentinel, stops, the DQ
-        floor, the drawdown taper, the kill-switch — still applies.
+        realized sell price — or, when the operator sets an explicit absolute
+        target via ``HELM_SWING_REBUY_PX``, once price falls to that level. The
+        manual ``buy`` command always wins if it fires first; otherwise the
+        passive dip-rebuy is the automatic safety net. Idempotent on the token,
+        so a routine restart never re-fires a stale command. While armed,
+        ``_run_entries`` / ``_run_rotation`` are blocked from re-buying the name
+        (the manual exit is not undone underneath the operator). Every guardrail
+        — Sentinel, stops, the DQ floor, the drawdown taper, the kill-switch —
+        still applies.
         """
         rc = self.settings.risk
         sym = (getattr(rc, "swing_symbol", "") or "").upper()
@@ -389,10 +393,22 @@ class Agent:
                     p.swing_armed = False
                     actions.append(Action("compliance", sym, "manual swing disarmed"))
 
-        # Passive: while armed, rebuy once price has dipped far enough below the sell.
+        # Passive: while armed, rebuy once price has dipped to the rebuy trigger.
+        # The trigger is the operator's absolute target (HELM_SWING_REBUY_PX) when
+        # set to a positive number, else ``swing_rebuy_drop`` below the realized
+        # sell price. This is the automatic safety net behind the manual buy.
         if p.swing_armed and p.swing_sell_px > 0:
             px = prices.get(sym)
-            if px is not None and px > 0 and px <= p.swing_sell_px * (1.0 - rc.swing_rebuy_drop):
+            trigger = p.swing_sell_px * (1.0 - rc.swing_rebuy_drop)
+            override = (os.environ.get("HELM_SWING_REBUY_PX", "") or "").strip()
+            if override:
+                try:
+                    ov = float(override)
+                    if ov > 0:
+                        trigger = ov
+                except ValueError:
+                    pass  # garbage target falls back to the percentage default
+            if px is not None and px > 0 and px <= trigger:
                 self._swing_buy(sym, snap, prices, actions, dry_run, now, "swing_dip_rebuy")
 
     def _swing_sell(self, sym, snap, prices, actions, dry_run, now) -> None:
