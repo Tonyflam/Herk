@@ -746,6 +746,133 @@ def test_harvest_trail_peak_persists_across_restart(tmp_path, monkeypatch):
         restored.close()
 
 
+# ============================================================================
+# TRAIL GUARD -- the trailing profit-lock extended to EVERY held name (not just
+# the swing symbol). A large second holding (e.g. INJ) is otherwise protected
+# only by its full ~8% trailing stop; this banks a slice as its top rolls over.
+# ============================================================================
+def _inj(qty: float, entry: float, peak: float, anchor: float = 0.0) -> Position:
+    """A non-swing INJ position with an explicit peak (highest_price) + re-arm."""
+    pos = _pos("INJ", qty=qty, price=entry)
+    pos.highest_price = peak
+    pos.trail_anchor = anchor
+    return pos
+
+
+def test_trail_guard_locks_profit_on_a_giveback(tmp_path, monkeypatch):
+    """A non-swing holding in profit that gives back the give-back from a fresh
+    peak banks a slice to USDT -- the same "cash the top" leg the harvester runs
+    on the swing name, now covering the rest of the book (here INJ)."""
+    agent = _hagent(tmp_path, monkeypatch, harvest_trail_giveback_pct=0.03)
+    try:
+        # Peak 5.00, now 4.85 = -3% off the high, still above the 4.50 entry.
+        _book(agent, cash=0.30, positions=[_inj(qty=10.0, entry=4.50, peak=5.00)])
+        actions: list = []
+        agent._run_trail_guard({"INJ": 4.85}, actions, dry_run=False)
+
+        assert abs(agent.portfolio.positions["INJ"].qty - 8.0) < 0.05      # ~20% banked
+        assert agent.portfolio.cash > 9.0                                  # USDT in hand
+        locks = [a for a in actions if a.kind == "exit" and "trail-lock" in a.detail]
+        assert locks and "pnl +" in locks[0].detail                       # realized gain
+        assert agent.portfolio.positions["INJ"].trail_anchor == 5.00       # re-armed at peak
+    finally:
+        agent.close()
+
+
+def test_trail_guard_off_by_default_is_a_no_op(tmp_path, monkeypatch):
+    """With the give-back at 0.0 (the default) the guard never fires -- existing
+    behaviour across the whole book is byte-for-byte preserved."""
+    agent = _hagent(tmp_path, monkeypatch)   # harvest_trail_giveback_pct defaults to 0.0
+    try:
+        _book(agent, cash=0.30, positions=[_inj(qty=10.0, entry=4.50, peak=5.00)])
+        actions: list = []
+        agent._run_trail_guard({"INJ": 4.85}, actions, dry_run=False)
+
+        assert abs(agent.portfolio.positions["INJ"].qty - 10.0) < 1e-9     # untouched
+        assert actions == []
+    finally:
+        agent.close()
+
+
+def test_trail_guard_holds_when_underwater(tmp_path, monkeypatch):
+    """The guard never realizes a loss: a give-back from the peak while price is
+    below the average entry does nothing (that fall is the stop's job)."""
+    agent = _hagent(tmp_path, monkeypatch, harvest_trail_giveback_pct=0.03)
+    try:
+        # Entry 5.00 > current 4.85 -> underwater; the guard must stand down.
+        _book(agent, cash=0.30, positions=[_inj(qty=10.0, entry=5.00, peak=5.00)])
+        actions: list = []
+        agent._run_trail_guard({"INJ": 4.85}, actions, dry_run=False)
+
+        assert abs(agent.portfolio.positions["INJ"].qty - 10.0) < 1e-9     # not sold
+        assert not any(a.kind == "exit" for a in actions)
+    finally:
+        agent.close()
+
+
+def test_trail_guard_fires_once_per_fresh_high(tmp_path, monkeypatch):
+    """After locking once the guard re-arms to the peak: it will NOT fire again
+    while price drifts under that same high, only after a genuinely NEW high."""
+    agent = _hagent(tmp_path, monkeypatch, harvest_trail_giveback_pct=0.03)
+    try:
+        _book(agent, cash=0.30, positions=[_inj(qty=10.0, entry=4.50, peak=5.00)])
+        actions: list = []
+        agent._run_trail_guard({"INJ": 4.85}, actions, dry_run=False)   # fires, anchor->5.00
+        qty_after_first = agent.portfolio.positions["INJ"].qty
+        assert qty_after_first < 9.0
+
+        # Same high, price drifts a touch lower -> no new high -> must NOT re-fire.
+        actions2: list = []
+        agent._run_trail_guard({"INJ": 4.80}, actions2, dry_run=False)
+        assert abs(agent.portfolio.positions["INJ"].qty - qty_after_first) < 1e-9
+        assert actions2 == []
+
+        # A genuinely NEW high then a fresh give-back re-arms and fires again.
+        agent.portfolio.positions["INJ"].highest_price = 5.40
+        actions3: list = []
+        agent._run_trail_guard({"INJ": 5.23}, actions3, dry_run=False)   # -3.1% off 5.40
+        assert agent.portfolio.positions["INJ"].qty < qty_after_first
+        assert any("trail-lock" in a.detail for a in actions3)
+    finally:
+        agent.close()
+
+
+def test_trail_guard_leaves_the_swing_symbol_to_the_harvester(tmp_path, monkeypatch):
+    """The swing symbol is the harvester's domain; the guard must never touch it
+    (double-management would bank two slices on one rollover)."""
+    agent = _hagent(tmp_path, monkeypatch, harvest_trail_giveback_pct=0.03)
+    try:
+        # AAVE is the configured swing symbol; give it a textbook give-back.
+        aave = _pos("AAVE", qty=1.0, price=86.0)
+        aave.highest_price = 95.0
+        _book(agent, cash=0.30, positions=[aave])
+        actions: list = []
+        agent._run_trail_guard({"AAVE": 92.0}, actions, dry_run=False)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 1.0) < 1e-9    # untouched
+        assert actions == []
+    finally:
+        agent.close()
+
+
+def test_trail_anchor_persists_across_restart(tmp_path, monkeypatch):
+    """The per-position re-arm anchor survives a reload so the guard stays
+    continuous across the agent's frequent restarts."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    agent = _hagent(tmp_path, monkeypatch, harvest_trail_giveback_pct=0.03)
+    try:
+        _book(agent, cash=10.0, positions=[_inj(qty=5.0, entry=4.50, peak=5.20, anchor=5.20)])
+        agent._save_state()
+    finally:
+        agent.close()
+
+    restored = _hagent(tmp_path, monkeypatch, harvest_trail_giveback_pct=0.03)
+    try:
+        assert restored.portfolio.positions["INJ"].trail_anchor == 5.20
+    finally:
+        restored.close()
+
+
 def test_harvest_owns_swing_symbol_in_block_helper(tmp_path, monkeypatch):
     """When harvesting, the symbol is blocked from the normal entry/rotation
     engine unconditionally -- the grid owns its whole inventory."""

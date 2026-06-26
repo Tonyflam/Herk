@@ -26,6 +26,10 @@ class Position:
     stop_distance: float
     highest_price: float
     entry_ts: str
+    # Trailing profit-lock re-arm reference: the peak (highest_price) at which the
+    # last trail-lock slice was banked. Lets the guard fire once per FRESH high
+    # rather than every cycle while price sits below the give-back band.
+    trail_anchor: float = 0.0
 
     def trailing_stop(self) -> float:
         """Trailing stop = the higher of the fixed stop and (peak − stop_dist)."""

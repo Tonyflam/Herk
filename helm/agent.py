@@ -260,6 +260,7 @@ class Agent:
         self._run_exits(prices, actions, dry_run)
         self._run_swing(snap, prices, actions, dry_run, now)
         self._run_harvest(snap, prices, posture, actions, dry_run, now)
+        self._run_trail_guard(prices, actions, dry_run)
         if not posture.halt_new_risk and not self.sentinel.kill_switch_engaged():
             self._run_rotation(snap, prices, posture, actions, dry_run, now)
             self._run_entries(snap, prices, posture, actions, dry_run, now)
@@ -625,6 +626,47 @@ class Agent:
         if px <= anchor * (1.0 - step):
             p.harvest_anchor_px = px                       # dip: buy a slice
             self._harvest_dip(sym, px, posture, snap, prices, actions, dry_run, now)
+
+    def _run_trail_guard(self, prices, actions, dry_run) -> None:
+        """Trailing profit-lock for every held name OTHER than the swing symbol.
+
+        The volatility harvester already scales the swing symbol out on a give-back
+        from its peak; this extends the same "bank a slice as the top rolls over"
+        protection to the rest of the book -- most importantly a large second
+        holding (e.g. INJ) that would otherwise be guarded only by its full
+        trailing stop (~8% below the high). Once a position in profit gives back
+        ``giveback`` from a FRESH peak it banks a fixed slice into USDT, re-armed
+        per new high so it fires once per rollover rather than every cycle. It is
+        sell-only -> always allowed (it only reduces risk); the in-profit gate
+        means it never realizes a loss, and the trailing stop still backstops a
+        deeper fall. Shares the HELM_HARVEST_GIVEBACK lever with the harvester;
+        off (giveback 0.0) it is a hard no-op.
+        """
+        rc = self.settings.risk
+        giveback = self._harvest_param(
+            "HELM_HARVEST_GIVEBACK", getattr(rc, "harvest_trail_giveback_pct", 0.0), 0.0, 0.5)
+        if giveback <= 0.0:
+            return
+        p = self.portfolio
+        if p.swing_armed:                       # don't fight an in-flight manual swing
+            return
+        swing_sym = (getattr(rc, "swing_symbol", "") or "").upper()
+        for sym, pos in list(p.positions.items()):
+            if sym == swing_sym or is_stable(sym):   # harvester owns the swing name
+                continue
+            if pos.qty <= 0:
+                continue
+            px = prices.get(sym)
+            if not px or px <= 0:
+                continue
+            peak = pos.highest_price
+            # Fire once per fresh rollover: a NEW high since the last lock now
+            # giving back >= giveback, with the position still in profit.
+            if (peak > pos.trail_anchor
+                    and px <= peak * (1.0 - giveback)
+                    and px > pos.avg_entry):
+                pos.trail_anchor = peak          # re-arm: needs a new high to fire again
+                self._harvest_bank(sym, px, actions, dry_run, reason="harvest_trail")
 
     def _harvest_min_trade(self) -> float:
         """Smallest harvest notional worth the gas (never below the dust floor)."""
