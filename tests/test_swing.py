@@ -873,6 +873,118 @@ def test_trail_anchor_persists_across_restart(tmp_path, monkeypatch):
         restored.close()
 
 
+# ============================================================================
+# CASH OUT -- whole-book flatten (sellall) + hold-cash latch + dip rebuy.
+# The operator's "close everything that's about to dip, wait, then rebuy" lever.
+# ============================================================================
+def test_sellall_flattens_whole_book_and_arms_rebuy(tmp_path, monkeypatch):
+    """``sellall`` liquidates EVERY non-stable holding to cash -- the swing name
+    via the armed swing-sell, every other name via a full flatten -- and latches
+    ``swing_flat`` so the freed cash is held for the dip rebuy."""
+    monkeypatch.setenv("HELM_SWING_CMD", "sellall#42")
+    agent = _hagent(tmp_path, monkeypatch)
+    monkeypatch.setenv("HELM_SWING_CMD", "sellall#42")   # _hagent cleared it; re-set
+    try:
+        _book(agent, cash=1.0, positions=[
+            _pos("AAVE", qty=1.0, price=90.0),       # the swing symbol
+            _inj(qty=10.0, entry=4.50, peak=5.00),   # a second, larger holding
+        ])
+        prices = {"AAVE": 95.0, "INJ": 4.85}
+        snap = _snap(ranked=[_sig("AAVE", 4.0, 95.0), _sig("INJ", 2.0, 4.85)])
+        actions: list = []
+        agent._run_swing(snap, prices, actions, dry_run=False, now=_NOW)
+
+        assert "AAVE" not in agent.portfolio.positions    # swing name flattened
+        assert "INJ" not in agent.portfolio.positions     # other name flattened too
+        assert agent.portfolio.cash > 130.0               # ~$95 + ~$48 freed to USDT
+        assert agent.portfolio.swing_armed is True        # rebuy armed on the swing name
+        assert agent.portfolio.swing_flat is True         # cash held for the dip
+        assert sum(1 for a in actions if a.kind == "exit") == 2
+    finally:
+        agent.close()
+
+
+def test_swing_flat_blocks_entries_and_rotation(tmp_path, monkeypatch):
+    """While the cash-out latch is set, neither entries nor rotation may redeploy
+    the held cash -- it waits for the dip rebuy."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=80.0, positions=[])
+        agent.portfolio.swing_flat = True
+        prices = {"INJ": 4.85}
+        snap = _snap(ranked=[_sig("INJ", 3.0, 4.85)])
+        actions: list = []
+        agent._run_entries(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+        agent._run_rotation(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.positions == {}            # nothing bought
+        assert agent.portfolio.cash == 80.0               # cash untouched
+    finally:
+        agent.close()
+
+
+def test_swing_flat_clears_on_dip_rebuy(tmp_path, monkeypatch):
+    """When the armed dip rebuy finally fires, the cash-out latch clears so the
+    engine resumes normal allocation on later cycles."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=80.0, positions=[])
+        p = agent.portfolio
+        p.swing_armed = True
+        p.swing_flat = True
+        p.swing_sell_px = 95.0                            # rebuy trigger = 95 * (1-0.02) = 93.1
+        prices = {"AAVE": 92.0}                           # below the trigger -> fires
+        snap = _snap(ranked=[_sig("AAVE", 4.0, 92.0)])
+        actions: list = []
+        agent._run_swing(snap, prices, actions, dry_run=False, now=_NOW)
+
+        assert "AAVE" in agent.portfolio.positions        # redeployed on the dip
+        assert agent.portfolio.swing_armed is False
+        assert agent.portfolio.swing_flat is False        # latch cleared
+    finally:
+        agent.close()
+
+
+def test_sellall_off_clears_the_latch(tmp_path, monkeypatch):
+    """``off`` cancels a pending cash-out wait (disarms + unlatches)."""
+    monkeypatch.setenv("HELM_SWING_CMD", "off#7")
+    agent = _hagent(tmp_path, monkeypatch)
+    monkeypatch.setenv("HELM_SWING_CMD", "off#7")
+    try:
+        _book(agent, cash=80.0, positions=[])
+        agent.portfolio.swing_armed = True
+        agent.portfolio.swing_flat = True
+        prices = {"AAVE": 92.0}
+        snap = _snap(ranked=[_sig("AAVE", 4.0, 92.0)])
+        actions: list = []
+        agent._run_swing(snap, prices, actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.swing_armed is False
+        assert agent.portfolio.swing_flat is False
+    finally:
+        agent.close()
+
+
+def test_swing_flat_persists_across_restart(tmp_path, monkeypatch):
+    """The cash-out latch survives a reload so a restart never accidentally
+    redeploys the held cash."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=80.0, positions=[])
+        agent.portfolio.swing_flat = True
+        agent._save_state()
+    finally:
+        agent.close()
+
+    restored = _hagent(tmp_path, monkeypatch)
+    try:
+        assert restored.portfolio.swing_flat is True
+    finally:
+        restored.close()
+
+
 def test_harvest_owns_swing_symbol_in_block_helper(tmp_path, monkeypatch):
     """When harvesting, the symbol is blocked from the normal entry/rotation
     engine unconditionally -- the grid owns its whole inventory."""

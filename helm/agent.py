@@ -108,6 +108,7 @@ class Agent:
             p.swing_armed = bool(d.get("swing_armed", False))
             p.swing_sell_px = float(d.get("swing_sell_px", 0.0))
             p.swing_token = str(d.get("swing_token", ""))
+            p.swing_flat = bool(d.get("swing_flat", False))
             p.harvest_anchor_px = float(d.get("harvest_anchor_px", 0.0))
             p.harvest_peak_px = float(d.get("harvest_peak_px", 0.0))
             return p
@@ -130,6 +131,7 @@ class Agent:
             "swing_armed": p.swing_armed,
             "swing_sell_px": p.swing_sell_px,
             "swing_token": p.swing_token,
+            "swing_flat": p.swing_flat,
             "harvest_anchor_px": p.harvest_anchor_px,
             "harvest_peak_px": p.harvest_peak_px,
         }
@@ -403,10 +405,13 @@ class Agent:
                 p.swing_token = token  # consume up-front: never retry-storm a bad command
                 if verb == "sell":
                     self._swing_sell(sym, snap, prices, actions, dry_run, now)
+                elif verb == "sellall":
+                    self._swing_sell_all(sym, snap, prices, actions, dry_run, now)
                 elif verb == "buy":
                     self._swing_buy(sym, snap, prices, actions, dry_run, now, "swing_manual_buy")
                 elif verb == "off":
                     p.swing_armed = False
+                    p.swing_flat = False
                     actions.append(Action("compliance", sym, "manual swing disarmed"))
 
         # Passive dip-buy: deploy idle cash into the swing symbol once price reaches
@@ -505,6 +510,53 @@ class Agent:
         actions.append(Action("exit", sym,
             f"manual-sell all @ {fill.price:.4f} pnl {realized:+.2f}; armed rebuy < {trigger:.4f}"))
 
+    def _flatten_position(self, sym, pos, prices, actions, dry_run) -> None:
+        """Liquidate one whole position to USDT (the per-name leg of a 'cash out')."""
+        ref = prices.get(sym, pos.avg_entry)
+        dec = self.sentinel.pre_exit(symbol=sym, qty=pos.qty, held_qty=pos.qty)
+        if not dec.approved:
+            actions.append(Action("blocked", sym, "flatten vetoed by sentinel"))
+            return
+        if dry_run:
+            actions.append(Action("dry_run", sym, f"would flatten all @ {ref:.4f}"))
+            return
+        order = Order(sym, "sell", ref_price=ref, qty=pos.qty,
+                      liquidity_usd=1e9, reason="swing_flatten")
+        fill = self.executor.execute(order)
+        if not fill.ok or fill.qty <= 0:
+            self.ledger.append("alert", {"reason": "swing_flatten_unfilled",
+                                          "symbol": sym, "note": fill.note[:80]})
+            actions.append(Action("blocked", sym, f"flatten unfilled: {fill.note[:60]}"))
+            return
+        realized = self.portfolio.apply_sell(fill)
+        self.ledger.append("trade", {**asdict(fill), "reason": "swing_flatten",
+                                      "realized_pnl": round(realized, 4)})
+        actions.append(Action("exit", sym,
+            f"flatten all @ {fill.price:.4f} pnl {realized:+.2f}"))
+
+    def _swing_sell_all(self, swing_sym, snap, prices, actions, dry_run, now) -> None:
+        """Flatten the WHOLE book to cash and arm the dip rebuy (operator 'cash out').
+
+        Sells every non-stable holding to USDT -- the swing symbol via the normal
+        armed swing-sell (which sets the proven dip-rebuy trigger) and every OTHER
+        position via a full liquidation -- then latches ``swing_flat`` so the
+        entry/rotation engine HOLDS all the freed cash instead of redeploying it
+        next cycle. The cash waits until the swing dip-rebuy fires (price falls
+        ``swing_rebuy_drop`` below the swing-symbol's sell price), at which point
+        ``_swing_buy`` redeploys into the engine's leader at the lower level and
+        clears the latch; any residual cash then funds the next-ranked name. Every
+        guardrail still applies and ``off`` cancels the wait. The latch is only set
+        when a real rebuy trigger got armed, so it can never strand cash forever.
+        """
+        p = self.portfolio
+        for s, pos in list(p.positions.items()):
+            if s == swing_sym or is_stable(s) or pos.qty <= 0:
+                continue
+            self._flatten_position(s, pos, prices, actions, dry_run)
+        self._swing_sell(swing_sym, snap, prices, actions, dry_run, now)
+        if not dry_run:
+            p.swing_flat = p.swing_armed       # only hold the cash if the rebuy is armed
+
     def _swing_buy(self, sym, snap, prices, actions, dry_run, now, reason) -> None:
         """Deploy available cash back into the swing symbol and disarm."""
         p = self.portfolio
@@ -544,6 +596,7 @@ class Agent:
         tp = fill.price + (atr * s.risk.take_profit_atr_mult if atr > 0 else fill.price * 0.10)
         p.apply_buy(fill, stop, tp, stop_dist)
         p.swing_armed = False
+        p.swing_flat = False
         self.ledger.append("trade", {**asdict(fill), "reason": reason,
                                       "stop": round(stop, 6), "tp": round(tp, 6)})
         actions.append(Action("entry", sym,
@@ -764,6 +817,8 @@ class Agent:
         """
         s = self.settings
         rc = s.risk
+        if self.portfolio.swing_flat:
+            return                              # 'cash out' latch: hold all cash for the dip
         if not getattr(rc, "rotation_enabled", True) or not self.portfolio.positions:
             return
         ranked = snap.top(s.signals.top_n)
@@ -892,6 +947,8 @@ class Agent:
 
     # -------------------------------------------------------------- entries
     def _run_entries(self, snap: SignalSnapshot, prices, posture, actions, dry_run, now) -> None:
+        if self.portfolio.swing_flat:
+            return                              # 'cash out' latch: hold all cash for the dip
         s = self.settings
         equity = self.portfolio.equity(prices)
         gross_cap_usd = posture.max_gross_pct * equity
