@@ -279,7 +279,19 @@ profiles:
       harvest_min_trade_usd: 4.0
     signals:
       min_composite_score: 0.06
-      top_n: 1                            # hold only the #1 relative-strength leader (fattest right tail)
+      top_n: 2                            # endgame: hold the TOP-2 relative-strength leaders
+                                          # (AAVE + the strongest liquid high-beta mover, XPL),
+                                          # diversifying the catch-up bet while the harvester
+                                          # banks gains. The competitors ahead are frozen in
+                                          # cash, so return from a 2nd strong name climbs the
+                                          # ladder directly without single-name blow-up risk.
+    universe:
+      # Endgame: widen the agent's eyes beyond the curated majors to include the
+      # single strongest liquid high-beta mover in the eligible set. XPL verified
+      # 2026-06-26: +23% 72h / +11.6% 24h, $131M 24h vol, ~10bps slippage (cheaper
+      # to trade than AAVE). The harvester banks AAVE rips into USDT, which the
+      # entry engine then deploys into XPL -> a self-funding AAVE+XPL momentum book.
+      extra_tradeable: ["XPL"]
     regime:
       risk_off_gross_scale: 0.99          # stay fully deployed through fear in the endgame (was 0.80)
       overlay_dd_gate_floor: 0.10         # apply little of the risk-off cut while DD budget is healthy

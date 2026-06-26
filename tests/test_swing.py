@@ -735,3 +735,65 @@ def test_harvest_frac_env_override_resizes_slice(tmp_path, monkeypatch):
     finally:
         agent.close()
 
+
+# ============================================================================
+# Harvester <-> rotation/entry coordination (endgame top_n=2 diversification).
+#
+# Live the harvester owns the swing symbol's whole inventory (it is the sole
+# controller of that core). Two invariants keep the rest of the engine from
+# fighting it while still letting the banked USDT diversify into the 2nd
+# strongest momentum name (the endgame AAVE+XPL book):
+#   1. rotation must NEVER sell the harvest-owned core, even when it looks like
+#      a large, stale, leader-dominated chunk -- only the harvester trims it;
+#   2. the cash the harvester banks must deploy into the 2nd-ranked name via the
+#      normal entry loop (the core stays blocked from re-entry).
+# ============================================================================
+def test_rotation_never_sells_harvest_owned_core(tmp_path, monkeypatch):
+    """The harvest-owned core is protected from rotation: even as a big, old,
+    cash-constrained holding that the leader dominates by a wide composite edge,
+    rotation leaves it untouched (only the harvester may trim that inventory)."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        # ~100% in AAVE with dust cash: big + capital-constrained + old, and the
+        # unheld leader XPL beats AAVE by a huge composite edge -> absent the
+        # harvest-core guard this is a textbook rotation sell.
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0, age_h=24)])
+        prices = {"AAVE": 86.0, "XPL": 1.20}
+        snap = _snap(ranked=[_sig("XPL", 2.9, 1.20), _sig("AAVE", 0.10, 86.0)])
+        actions: list = []
+        agent._run_rotation(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert "AAVE" in agent.portfolio.positions                  # core untouched
+        assert abs(agent.portfolio.positions["AAVE"].qty - 1.0) < 1e-9
+        assert not any(a.kind == "exit" for a in actions)           # no rotation fired
+    finally:
+        agent.close()
+
+
+def test_entries_deploy_banked_cash_into_second_name(tmp_path, monkeypatch):
+    """With top_n=2 and the harvester owning the core, USDT banked from a rip is
+    deployed into the 2nd-ranked momentum name -- not back into the blocked core
+    -- realizing the self-funding AAVE+XPL diversification."""
+    # Endgame sizing: the live max profile lets a single name run to 80% so the
+    # banked USDT clears the Sentinel's economic floor in one deploy.
+    agent = _hagent(tmp_path, monkeypatch, max_position_pct=0.80)
+    agent.settings.signals = replace(agent.settings.signals, top_n=2)
+    try:
+        # AAVE core ($43) + USDT the harvester has already banked ($60).
+        _book(agent, cash=60.0, positions=[_pos("AAVE", qty=0.5, price=86.0)])
+        prices = {"AAVE": 86.0, "XPL": 1.20}
+        before_aave = agent.portfolio.positions["AAVE"].qty
+        # AAVE ranks #1 (blocked from re-entry); XPL #2 is the deployable name.
+        xpl = replace(_sig("XPL", 2.6, 1.20), atr=0.03)
+        snap = _snap(ranked=[_sig("AAVE", 2.8, 86.0), xpl])
+        actions: list = []
+        agent._run_entries(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert "XPL" in agent.portfolio.positions                   # diversified in
+        assert agent.portfolio.positions["XPL"].qty > 0
+        assert abs(agent.portfolio.positions["AAVE"].qty - before_aave) < 1e-9  # core not re-bought
+        assert agent.portfolio.cash < 60.0                          # banked USDT deployed
+        assert any(a.kind == "entry" and a.symbol == "XPL" for a in actions)
+    finally:
+        agent.close()
+

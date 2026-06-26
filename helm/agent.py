@@ -733,7 +733,7 @@ class Agent:
         # when we're cash-constrained OR it is itself a large stale chunk.
         cands: list[tuple[float, float, str, Position]] = []
         for sym, pos in self.portfolio.positions.items():
-            if sym in top_syms or sym == leader.symbol:
+            if sym in top_syms or sym == leader.symbol or sym == swing_block:
                 continue
             held_val = pos.qty * prices.get(sym, pos.avg_entry)
             if held_val < rc.rotation_min_stale_usd:
