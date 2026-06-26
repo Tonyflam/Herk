@@ -146,6 +146,15 @@ class RiskCfg:
     # AHEAD of a deeper dip (scale out as a move rolls over). 0.0 = OFF (pure band
     # grid -- existing behaviour). Live-tunable via HELM_HARVEST_GIVEBACK.
     harvest_trail_giveback_pct: float = 0.0
+    # --- Autopilot: autonomous momentum risk-on/off (step to cash on a roll-over,
+    # buy back on an up-turn) using the leader's fast (few-hour) momentum as the
+    # gauge, with a dead-band between the two thresholds to damp whipsaw. OFF by
+    # default; ON in the live `max` profile. Reuses the tested flatten + redeploy
+    # paths so every guardrail still applies. Live-tunable without a redeploy via
+    # HELM_AUTOPILOT (on/off), HELM_AP_EXIT / HELM_AP_ENTRY (momentum thresholds).
+    autopilot_enabled: bool = False
+    autopilot_exit_mom: float = -0.015        # flat to cash when leader fast-mom <= this
+    autopilot_entry_mom: float = 0.015        # buy back when leader fast-mom >= this
 
 
 @dataclass

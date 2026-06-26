@@ -296,8 +296,20 @@ profiles:
       harvest_trade_frac: 0.20
       harvest_min_trade_usd: 4.0
       harvest_trail_giveback_pct: 0.03   # scale a slice out on a 3% give-back from a fresh peak
+      # Autopilot: autonomous momentum risk-on/off. Steps the WHOLE book to cash
+      # when the leader's fast (few-hour) momentum rolls over past exit_mom, and
+      # buys back into the leader once it turns up past entry_mom. The gap between
+      # the two is a dead-band so a steady trend is ridden, not churned. This is
+      # the "knows when to close and when to buy" brain -- it reacts intraday,
+      # faster than the multi-horizon composite or the ~8% trailing stop. Every
+      # guardrail still applies; live-tunable via HELM_AUTOPILOT / HELM_AP_EXIT /
+      # HELM_AP_ENTRY without a redeploy.
+      autopilot_enabled: true
+      autopilot_exit_mom: -0.015         # flat to cash when leader fast-mom <= -1.5%
+      autopilot_entry_mom: 0.015         # buy back when leader fast-mom >= +1.5%
     signals:
       min_composite_score: 0.06
+      autopilot_fast_hours: 3            # fast-momentum window (1h closes) the autopilot reads
       top_n: 2                            # endgame: hold the TOP-2 relative-strength leaders
                                           # (AAVE + the strongest liquid high-beta ROUTABLE mover,
                                           # e.g. INJ), diversifying the catch-up bet while the

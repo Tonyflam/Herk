@@ -261,6 +261,7 @@ class Agent:
 
         self._run_exits(prices, actions, dry_run)
         self._run_swing(snap, prices, actions, dry_run, now)
+        self._run_autopilot(snap, prices, posture, actions, dry_run, now)
         self._run_harvest(snap, prices, posture, actions, dry_run, now)
         self._run_trail_guard(prices, actions, dry_run)
         if not posture.halt_new_risk and not self.sentinel.kill_switch_engaged():
@@ -431,7 +432,8 @@ class Agent:
         idle_cash = p.cash - max(rc.gas_usd_per_swap, 0.0)
         have_idle = idle_cash >= self.settings.contest.dust_floor_usd
         if (trigger and trigger > 0 and have_idle
-                and px is not None and px > 0 and px <= trigger):
+                and px is not None and px > 0 and px <= trigger
+                and not self._autopilot_enabled()):    # autopilot owns re-entry by momentum
             self._swing_buy(sym, snap, prices, actions, dry_run, now, "swing_dip_rebuy")
 
     def _swing_override_px(self) -> float | None:
@@ -448,6 +450,75 @@ class Agent:
             return v if v > 0 else None
         except ValueError:
             return None
+
+    def _autopilot_enabled(self) -> bool:
+        """Whether the autonomous momentum pilot is active (env overrides config).
+
+        ``HELM_AUTOPILOT`` (on/off/1/0/true/false) flips it live without a code
+        change; otherwise the profile's ``risk.autopilot_enabled`` applies.
+        """
+        raw = (os.environ.get("HELM_AUTOPILOT", "") or "").strip().lower()
+        if raw in ("1", "true", "yes", "on"):
+            return True
+        if raw in ("0", "false", "no", "off"):
+            return False
+        return bool(getattr(self.settings.risk, "autopilot_enabled", False))
+
+    def _run_autopilot(self, snap: SignalSnapshot, prices, posture, actions, dry_run, now) -> None:
+        """Autonomous momentum pilot: step aside to cash when the market rolls
+        over, buy back when it turns up -- so the book follows the trend without a
+        human firing levers.
+
+        Gauge = the strongest ranked name's fast (few-hour) momentum. A dead-band
+        between the exit and entry thresholds damps whipsaw (it takes a genuine
+        turn, not noise, to flip the stance). The EXIT leg flattens every risk
+        holding to USDT and latches the cash (sell-only -> always allowed, even
+        when halted); the ENTRY leg redeploys idle cash into the leader only when
+        new risk is permitted. Reuses the tested flatten/redeploy paths, so every
+        guardrail (Sentinel, stops, DQ floor, drawdown taper, kill-switch) still
+        applies. OFF unless enabled; the dead-band means a steady trend is ridden,
+        not churned.
+        """
+        if not self._autopilot_enabled():
+            return
+        rc = self.settings.risk
+        p = self.portfolio
+        ranked = snap.top(1)
+        if not ranked:
+            return
+        leader = ranked[0]
+        fast = float(getattr(leader, "fast_return", 0.0) or 0.0)
+        exit_t = self._harvest_param("HELM_AP_EXIT",
+                                     getattr(rc, "autopilot_exit_mom", -0.015), -0.5, 0.0)
+        entry_t = self._harvest_param("HELM_AP_ENTRY",
+                                      getattr(rc, "autopilot_entry_mom", 0.015), 0.0, 0.5)
+        held_risk = [(s, pos) for s, pos in p.positions.items()
+                     if not is_stable(s) and pos.qty > 0]
+
+        # EXIT: the market is rolling over -> flatten everything to cash and hold
+        # it. De-risking, so it runs even under a halt posture.
+        if held_risk and fast <= exit_t:
+            for s, pos in list(held_risk):
+                self._flatten_position(s, pos, prices, actions, dry_run)
+            if not dry_run:
+                p.swing_armed = False
+                p.swing_flat = True               # hold cash; re-enter only on an up-turn
+            actions.append(Action("compliance", leader.symbol,
+                f"autopilot -> CASH (fast mom {fast:+.2%} <= {exit_t:+.2%})"))
+            return
+
+        # ENTRY: the market is turning up while we sit in cash -> redeploy into the
+        # leader (then the normal rebalance re-splits across the top names). Adds
+        # risk, so it respects the halt + kill-switch.
+        have_cash = (p.cash - max(rc.gas_usd_per_swap, 0.0)) >= self.settings.contest.dust_floor_usd
+        if (not held_risk and have_cash and fast >= entry_t and leader.eligible
+                and not getattr(posture, "halt_new_risk", False)
+                and not self.sentinel.kill_switch_engaged()):
+            if not dry_run:
+                p.swing_armed = False
+            self._swing_buy(leader.symbol, snap, prices, actions, dry_run, now, "autopilot_buy")
+            actions.append(Action("compliance", leader.symbol,
+                f"autopilot -> RISK-ON (fast mom {fast:+.2%} >= {entry_t:+.2%})"))
 
     def _swing_block_symbol(self) -> str:
         """Swing symbol whose auto-(re)buy by entries/rotation must be suppressed.

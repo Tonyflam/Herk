@@ -458,7 +458,8 @@ def _hsettings(**risk_overrides):
 def _hagent(tmp_path, monkeypatch, **risk_overrides) -> Agent:
     """Harvester-enabled agent with all swing/harvest env knobs cleared."""
     for var in ("HELM_SWING_CMD", "HELM_SWING_REBUY_PX",
-                "HELM_HARVEST_STEP", "HELM_HARVEST_FRAC"):
+                "HELM_HARVEST_STEP", "HELM_HARVEST_FRAC",
+                "HELM_AUTOPILOT", "HELM_AP_EXIT", "HELM_AP_ENTRY"):
         monkeypatch.delenv(var, raising=False)
     return _agent(tmp_path, _hsettings(**risk_overrides))
 
@@ -1166,4 +1167,193 @@ def test_entries_deploy_banked_cash_into_second_name(tmp_path, monkeypatch):
         assert any(a.kind == "entry" and a.symbol == "XPL" for a in actions)
     finally:
         agent.close()
+
+
+# ============================================================================
+# AUTOPILOT -- autonomous momentum risk-on/off. Steps the WHOLE book to cash
+# when the leader's fast (few-hour) momentum rolls over, buys back when it turns
+# up, with a dead-band between the thresholds to damp whipsaw. This is the
+# "knows when to close and when to buy" brain; it needs no operator levers.
+# ============================================================================
+def _apsig(symbol: str, composite: float, price: float, fast: float) -> SymbolSignal:
+    """A ranked signal carrying an explicit fast-momentum reading for the pilot."""
+    return replace(_sig(symbol, composite, price), fast_return=fast)
+
+
+def _apagent(tmp_path, monkeypatch, **overrides):
+    """Harvester agent with the autopilot enabled (env knobs cleared)."""
+    base = dict(autopilot_enabled=True, autopilot_exit_mom=-0.015, autopilot_entry_mom=0.015)
+    base.update(overrides)
+    return _hagent(tmp_path, monkeypatch, **base)
+
+
+def test_autopilot_exits_whole_book_to_cash_on_rollover(tmp_path, monkeypatch):
+    """When the leader's fast momentum rolls over past the exit threshold, the
+    pilot flattens EVERY risk holding to USDT and latches the cash -- no operator
+    command needed."""
+    agent = _apagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=1.0, positions=[
+            _pos("AAVE", qty=1.0, price=90.0),
+            _inj(qty=10.0, entry=4.50, peak=5.00),
+        ])
+        prices = {"AAVE": 93.0, "INJ": 4.80}
+        # Leader AAVE fast mom -2.0% (<= -1.5%) -> roll-over -> go to cash.
+        snap = _snap(ranked=[_apsig("AAVE", 4.0, 93.0, fast=-0.02),
+                             _apsig("INJ", 2.0, 4.80, fast=-0.01)])
+        actions: list = []
+        agent._run_autopilot(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.positions == {}              # everything flattened
+        assert agent.portfolio.cash > 130.0                 # ~$93 + ~$48 to USDT
+        assert agent.portfolio.swing_flat is True           # cash held for the turn
+        assert any(a.kind == "compliance" and "CASH" in a.detail for a in actions)
+        assert sum(1 for a in actions if a.kind == "exit") == 2
+    finally:
+        agent.close()
+
+
+def test_autopilot_buys_back_on_momentum_turn(tmp_path, monkeypatch):
+    """Sitting in cash, once the leader's fast momentum turns up past the entry
+    threshold the pilot redeploys into it on its own and clears the cash latch."""
+    agent = _apagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=80.0, positions=[])
+        agent.portfolio.swing_flat = True                   # parked in cash
+        prices = {"AAVE": 92.0}
+        # Leader fast mom +2.0% (>= +1.5%) -> up-turn -> deploy.
+        snap = _snap(ranked=[_apsig("AAVE", 4.0, 92.0, fast=0.02)])
+        actions: list = []
+        agent._run_autopilot(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert "AAVE" in agent.portfolio.positions          # bought back in
+        assert agent.portfolio.positions["AAVE"].qty > 0
+        assert agent.portfolio.swing_flat is False          # latch cleared
+        assert any(a.kind == "compliance" and "RISK-ON" in a.detail for a in actions)
+    finally:
+        agent.close()
+
+
+def test_autopilot_rides_inside_the_deadband(tmp_path, monkeypatch):
+    """Between the exit and entry thresholds the pilot does nothing -- a steady
+    trend is ridden, not churned."""
+    agent = _apagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=1.0, positions=[_pos("AAVE", qty=1.0, price=90.0)])
+        prices = {"AAVE": 93.0}
+        snap = _snap(ranked=[_apsig("AAVE", 4.0, 93.0, fast=0.0)])  # flat momentum
+        actions: list = []
+        agent._run_autopilot(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert "AAVE" in agent.portfolio.positions          # held, not sold
+        assert abs(agent.portfolio.positions["AAVE"].qty - 1.0) < 1e-9
+        assert actions == []
+    finally:
+        agent.close()
+
+
+def test_autopilot_stays_in_cash_while_falling(tmp_path, monkeypatch):
+    """In cash with the leader still falling, the pilot must NOT buy a falling
+    knife -- it waits for the momentum to turn up first."""
+    agent = _apagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=80.0, positions=[])
+        agent.portfolio.swing_flat = True
+        prices = {"AAVE": 88.0}
+        snap = _snap(ranked=[_apsig("AAVE", 4.0, 88.0, fast=-0.03)])  # still down
+        actions: list = []
+        agent._run_autopilot(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.positions == {}              # nothing bought
+        assert agent.portfolio.cash == 80.0
+    finally:
+        agent.close()
+
+
+def test_autopilot_off_is_a_no_op(tmp_path, monkeypatch):
+    """Disabled (the default), the pilot never acts even on a clear roll-over."""
+    agent = _hagent(tmp_path, monkeypatch)   # autopilot_enabled defaults to False
+    try:
+        _book(agent, cash=1.0, positions=[_pos("AAVE", qty=1.0, price=90.0)])
+        prices = {"AAVE": 93.0}
+        snap = _snap(ranked=[_apsig("AAVE", 4.0, 93.0, fast=-0.05)])
+        actions: list = []
+        agent._run_autopilot(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert "AAVE" in agent.portfolio.positions
+        assert actions == []
+    finally:
+        agent.close()
+
+
+def test_autopilot_env_toggle_overrides_config(tmp_path, monkeypatch):
+    """HELM_AUTOPILOT flips the pilot live without a redeploy, both directions."""
+    agent = _apagent(tmp_path, monkeypatch)     # config says ON
+    try:
+        monkeypatch.setenv("HELM_AUTOPILOT", "0")
+        assert agent._autopilot_enabled() is False           # env OFF wins
+        monkeypatch.setenv("HELM_AUTOPILOT", "on")
+        assert agent._autopilot_enabled() is True
+        monkeypatch.delenv("HELM_AUTOPILOT", raising=False)
+        assert agent._autopilot_enabled() is True            # falls back to config
+    finally:
+        agent.close()
+
+
+def test_autopilot_exit_runs_even_when_halted(tmp_path, monkeypatch):
+    """The cash-out leg is de-risking, so a halt posture must NOT block it."""
+    agent = _apagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=1.0, positions=[_pos("AAVE", qty=1.0, price=90.0)])
+        prices = {"AAVE": 93.0}
+        snap = _snap(ranked=[_apsig("AAVE", 4.0, 93.0, fast=-0.02)])
+        actions: list = []
+        agent._run_autopilot(snap, prices, _halted_posture(), actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.positions == {}              # still flattened
+        assert agent.portfolio.swing_flat is True
+    finally:
+        agent.close()
+
+
+def test_autopilot_entry_respects_halt(tmp_path, monkeypatch):
+    """The buy-back leg adds risk, so a halt posture must block it (stay in cash)."""
+    agent = _apagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=80.0, positions=[])
+        agent.portfolio.swing_flat = True
+        prices = {"AAVE": 92.0}
+        snap = _snap(ranked=[_apsig("AAVE", 4.0, 92.0, fast=0.02)])
+        actions: list = []
+        agent._run_autopilot(snap, prices, _halted_posture(), actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.positions == {}              # no buy under halt
+        assert agent.portfolio.cash == 80.0
+    finally:
+        agent.close()
+
+
+def test_autopilot_thresholds_tunable_via_env(tmp_path, monkeypatch):
+    """HELM_AP_EXIT retunes the roll-over trigger live: a -1.0% move that is
+    inside the default -1.5% band fires once the band is loosened to -0.8%."""
+    agent = _apagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=1.0, positions=[_pos("AAVE", qty=1.0, price=90.0)])
+        prices = {"AAVE": 93.0}
+        snap = _snap(ranked=[_apsig("AAVE", 4.0, 93.0, fast=-0.010)])  # -1.0%
+
+        # Default band (-1.5%): a -1.0% move does NOT trigger.
+        actions: list = []
+        agent._run_autopilot(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+        assert "AAVE" in agent.portfolio.positions
+
+        # Loosened to -0.8% via env: now the same -1.0% move flattens to cash.
+        monkeypatch.setenv("HELM_AP_EXIT", "-0.008")
+        actions2: list = []
+        agent._run_autopilot(snap, prices, _posture(), actions2, dry_run=False, now=_NOW)
+        assert agent.portfolio.positions == {}
+        assert any(a.kind == "compliance" and "CASH" in a.detail for a in actions2)
+    finally:
+        agent.close()
+
 

@@ -33,6 +33,7 @@ class SymbolSignal:
     price: float = 0.0
     composite: float = 0.0
     mom_blended_return: float = 0.0
+    fast_return: float = 0.0          # short-horizon (few-hour) return — the autopilot's gauge
     realized_vol_annual: float = 0.0
     atr: float = 0.0
     atr_pct: float = 0.0
@@ -107,6 +108,11 @@ class SignalEngine:
                     blended += w * max(r, 0.0)  # cost gate uses positive drift only
                 vol_adj[L].append(va if va is not None else float("nan"))
             sig.mom_blended_return = blended
+            # Fast momentum gauge for the autonomous autopilot (few-hour return on
+            # the same 1h closes the engine already holds — no extra data call).
+            fh = int(getattr(s.signals, "autopilot_fast_hours", 3) or 3)
+            _fr = M.lookback_return(closes, fh)
+            sig.fast_return = _fr if _fr is not None else 0.0
 
             idx_with_data.append(len(rows))
             rows.append(sig)
