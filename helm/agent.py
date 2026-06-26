@@ -363,12 +363,14 @@ class Agent:
         ``HELM_SWING_CMD`` env var (``verb#token`` — ``sell`` / ``buy`` / ``off``),
         then auto-rebuys that name once it dips ``swing_rebuy_drop`` below the
         realized sell price — or, when the operator sets an explicit absolute
-        target via ``HELM_SWING_REBUY_PX``, once price falls to that level. The
-        manual ``buy`` command always wins if it fires first; otherwise the
-        passive dip-rebuy is the automatic safety net. Idempotent on the token,
-        so a routine restart never re-fires a stale command. While armed,
-        ``_run_entries`` / ``_run_rotation`` are blocked from re-buying the name
-        (the manual exit is not undone underneath the operator). Every guardrail
+        target via ``HELM_SWING_REBUY_PX``, once price falls to that level. That
+        absolute target also acts as a STANDING buy-the-dip order: whenever it is
+        set and we hold idle cash, the agent holds that cash (blocking the normal
+        entry/rotation loop from spending it on the symbol) and deploys it into
+        the symbol on the dip — so it adds MORE on a dip even after we have already
+        re-entered. The manual ``buy`` command always wins if it fires first;
+        otherwise the dip-buy is the automatic safety net. Idempotent on the
+        token, so a routine restart never re-fires a stale command. Every guardrail
         — Sentinel, stops, the DQ floor, the drawdown taper, the kill-switch —
         still applies.
         """
@@ -393,23 +395,63 @@ class Agent:
                     p.swing_armed = False
                     actions.append(Action("compliance", sym, "manual swing disarmed"))
 
-        # Passive: while armed, rebuy once price has dipped to the rebuy trigger.
-        # The trigger is the operator's absolute target (HELM_SWING_REBUY_PX) when
-        # set to a positive number, else ``swing_rebuy_drop`` below the realized
-        # sell price. This is the automatic safety net behind the manual buy.
+        # Passive dip-buy: deploy idle cash into the swing symbol once price reaches
+        # the rebuy trigger. Active either after a manual sell (armed, trigger =
+        # sell_px x (1 - swing_rebuy_drop)) OR whenever an absolute target
+        # (HELM_SWING_REBUY_PX) is standing and we still hold idle cash — a plain
+        # buy-the-dip limit order, so it also adds MORE on a dip after we have
+        # already re-entered. Runs before the halt gate, so a cautious posture
+        # never blocks the operator's intent.
+        px = prices.get(sym)
+        override = self._swing_override_px()
+        trigger = None
         if p.swing_armed and p.swing_sell_px > 0:
-            px = prices.get(sym)
             trigger = p.swing_sell_px * (1.0 - rc.swing_rebuy_drop)
-            override = (os.environ.get("HELM_SWING_REBUY_PX", "") or "").strip()
-            if override:
-                try:
-                    ov = float(override)
-                    if ov > 0:
-                        trigger = ov
-                except ValueError:
-                    pass  # garbage target falls back to the percentage default
-            if px is not None and px > 0 and px <= trigger:
-                self._swing_buy(sym, snap, prices, actions, dry_run, now, "swing_dip_rebuy")
+        if override is not None:
+            trigger = override                       # explicit absolute target wins
+        idle_cash = p.cash - max(rc.gas_usd_per_swap, 0.0)
+        have_idle = idle_cash >= self.settings.contest.dust_floor_usd
+        if (trigger and trigger > 0 and have_idle
+                and px is not None and px > 0 and px <= trigger):
+            self._swing_buy(sym, snap, prices, actions, dry_run, now, "swing_dip_rebuy")
+
+    def _swing_override_px(self) -> float | None:
+        """Operator's absolute auto-rebuy target (HELM_SWING_REBUY_PX), or None.
+
+        A positive number sets an explicit buy-the-dip price that overrides the
+        percentage default; anything missing or non-numeric is ignored.
+        """
+        raw = (os.environ.get("HELM_SWING_REBUY_PX", "") or "").strip()
+        if not raw:
+            return None
+        try:
+            v = float(raw)
+            return v if v > 0 else None
+        except ValueError:
+            return None
+
+    def _swing_block_symbol(self) -> str:
+        """Swing symbol whose auto-(re)buy by entries/rotation must be suppressed.
+
+        Returns the symbol while a dip-buy is pending — either armed after a manual
+        sell (never let the engine undo the exit), or a standing absolute target
+        with idle cash earmarked for the dip (hold the cash, don't let entries
+        spend it on the symbol meanwhile). Empty string when nothing is pending.
+        """
+        rc = self.settings.risk
+        if not getattr(rc, "swing_enabled", False):
+            return ""
+        sym = (getattr(rc, "swing_symbol", "") or "").upper()
+        if not sym:
+            return ""
+        p = self.portfolio
+        if p.swing_armed:
+            return sym                               # armed after a sell: never re-buy
+        if self._swing_override_px() is not None:
+            idle_cash = p.cash - max(rc.gas_usd_per_swap, 0.0)
+            if idle_cash >= self.settings.contest.dust_floor_usd:
+                return sym                           # holding idle cash for the dip
+        return ""
 
     def _swing_sell(self, sym, snap, prices, actions, dry_run, now) -> None:
         """Liquidate the entire swing-symbol position to cash and arm the rebuy."""
@@ -521,7 +563,7 @@ class Agent:
         ranked = snap.top(s.signals.top_n)
         if not ranked:
             return
-        swing_block = (rc.swing_symbol or "").upper() if self.portfolio.swing_armed else ""
+        swing_block = self._swing_block_symbol()
         if swing_block:
             # Don't let rotation steer freed capital into a name the operator is
             # deliberately holding in cash for a manual dip rebuy.
@@ -609,7 +651,7 @@ class Agent:
         # Small reserve so sizing never targets the exact cap (equity drifts as
         # we fill above mid); avoids off-by-epsilon rejections at the boundary.
         reserve = 0.01 * gross_cap_usd
-        swing_block = (s.risk.swing_symbol or "").upper() if self.portfolio.swing_armed else ""
+        swing_block = self._swing_block_symbol()
         for sig in snap.top(s.signals.top_n):
             if swing_block and sig.symbol.upper() == swing_block:
                 # Manual swing has this name parked in cash awaiting its dip
@@ -802,8 +844,15 @@ class Agent:
 
         held = list(self.portfolio.positions)
         base = s.capital.base_currency
+        # Query held + base + the operator's swing symbol + the ranked universe
+        # (``prices`` keys), so we can also DETECT holdings the book has lost track
+        # of (a redeploy that dropped a position from saved state), not just the
+        # ones we already book.
+        swing_sym = (getattr(s.risk, "swing_symbol", "") or "").upper()
+        query = list(dict.fromkeys(
+            [*held, base, *([swing_sym] if swing_sym else []), *prices.keys()]))
         try:
-            holdings = onchain.wallet_holdings(s, wallet, [*held, base])
+            holdings = onchain.wallet_holdings(s, wallet, query)
         except Exception as e:
             self.ledger.append("alert", {"reason": "onchain_reconcile",
                                          "detail": f"read failed: {type(e).__name__}"})
@@ -839,6 +888,41 @@ class Agent:
                     del self.portfolio.positions[sym]
                 else:
                     pos.qty = chain
+
+        # Adopt on-chain holdings the book has LOST track of (e.g. a redeploy
+        # dropped a position from saved state). Without this the agent goes blind
+        # to a real holding, under-reports equity, and can FALSE-trip the drawdown
+        # halt. Mark entry at the current price (the true fill is unrecoverable)
+        # with a wide protective stop so an adopted position is not stopped out by
+        # ordinary noise — the survival taper + DQ gate remain the real controls.
+        if s.scoring.mark_from_onchain:
+            for asym, ah in list(holdings.items()):
+                if asym == base or asym in self.portfolio.positions:
+                    continue
+                if not ah or not ah.ok or ah.units <= 1e-12:
+                    continue
+                apx = prices.get(asym) or 0.0
+                if apx <= 0:
+                    try:
+                        q = self.market.get_quote(asym)
+                        apx = q.price if q.price > 0 else 0.0
+                    except Exception:
+                        apx = 0.0
+                if apx <= 0 or ah.units * apx < self.settings.contest.dust_floor_usd:
+                    continue
+                stop_dist = apx * 0.20            # wide: defer to manual + survival taper
+                self.portfolio.positions[asym] = Position(
+                    symbol=asym, qty=ah.units, avg_entry=apx,
+                    stop_price=max(0.0, apx - stop_dist), take_profit_price=apx * 1.50,
+                    stop_distance=stop_dist, highest_price=apx,
+                    entry_ts=datetime.now(timezone.utc).isoformat(),
+                )
+                prices.setdefault(asym, apx)
+                drifts.append({"sym": asym, "booked": 0.0,
+                               "chain": round(ah.units, 8), "adopted": True})
+                if actions is not None:
+                    actions.append(Action("reconcile", asym,
+                                          f"adopted {ah.units:.6f} from chain @ {apx:.4f}"))
 
         if drifts:
             self.ledger.append("reconcile", {"wallet": wallet[:10] + "…",

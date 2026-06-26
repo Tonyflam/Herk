@@ -350,3 +350,88 @@ def test_swing_state_survives_restart(tmp_path, monkeypatch):
         assert restored.portfolio.swing_token == "3"
     finally:
         restored.close()
+
+
+# ----------------------------------------- standing buy-the-dip (add-on-dip)
+def test_standing_target_buys_dip_when_already_holding(tmp_path, monkeypatch):
+    """A standing HELM_SWING_REBUY_PX deploys idle cash into MORE of the name on
+    the dip, even when not armed and already holding a position."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    monkeypatch.setenv("HELM_SWING_REBUY_PX", "83.9")
+    agent = _agent(tmp_path)
+    try:
+        # Already re-entered (0.7 AAVE) with leftover cash to add on the dip.
+        _book(agent, cash=32.0, positions=[_pos("AAVE", qty=0.7, price=85.0)])
+        assert agent.portfolio.swing_armed is False
+        prices = {"AAVE": 83.9}                          # at the standing target
+        snap = _snap(ranked=[_sig("AAVE", 2.7, 83.9)])
+        actions: list = []
+        agent._run_swing(snap, prices, actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.positions["AAVE"].qty > 0.7   # added to the position
+        assert agent.portfolio.cash < 5.0                    # idle cash deployed
+        assert any(a.kind == "entry" and "swing-rebuy" in a.detail for a in actions)
+    finally:
+        agent.close()
+
+
+def test_standing_target_holds_cash_above_level(tmp_path, monkeypatch):
+    """Above the standing target, idle cash is held (no add) — waiting for the dip."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    monkeypatch.setenv("HELM_SWING_REBUY_PX", "83.9")
+    agent = _agent(tmp_path)
+    try:
+        _book(agent, cash=32.0, positions=[_pos("AAVE", qty=0.7, price=85.0)])
+        prices = {"AAVE": 85.39}                         # above 83.9
+        snap = _snap(ranked=[_sig("AAVE", 2.7, 85.39)])
+        actions: list = []
+        agent._run_swing(snap, prices, actions, dry_run=False, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 0.7) < 1e-9  # unchanged
+        assert agent.portfolio.cash == 32.0                            # cash held
+    finally:
+        agent.close()
+
+
+def test_standing_target_blocks_entries_from_spending_cash(tmp_path, monkeypatch):
+    """While a standing target holds idle cash, the normal entry loop must not
+    spend it on the swing symbol (the cash is earmarked for the dip)."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    monkeypatch.setenv("HELM_SWING_REBUY_PX", "83.9")
+    agent = _agent(tmp_path)
+    try:
+        _book(agent, cash=32.0, positions=[_pos("AAVE", qty=0.7, price=85.0)])
+        prices = {"AAVE": 85.39}
+        snap = _snap(ranked=[_sig("AAVE", 2.7, 85.39)])
+        actions: list = []
+        agent._run_entries(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 0.7) < 1e-9  # not topped up
+        assert agent.portfolio.cash == 32.0
+        assert not any(a.kind == "entry" for a in actions)
+    finally:
+        agent.close()
+
+
+def test_block_symbol_helper_states(tmp_path, monkeypatch):
+    """_swing_block_symbol: armed blocks unconditionally; standing target blocks
+    only with idle cash; nothing pending returns empty."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    monkeypatch.delenv("HELM_SWING_REBUY_PX", raising=False)
+    agent = _agent(tmp_path)
+    try:
+        _book(agent, cash=0.5, positions=[_pos("AAVE", qty=0.7, price=85.0)])
+        # Nothing pending: no block.
+        assert agent._swing_block_symbol() == ""
+        # Armed: blocks even with sub-dust cash.
+        agent.portfolio.swing_armed = True
+        assert agent._swing_block_symbol() == "AAVE"
+        agent.portfolio.swing_armed = False
+        # Standing target but no idle cash: no block.
+        monkeypatch.setenv("HELM_SWING_REBUY_PX", "83.9")
+        assert agent._swing_block_symbol() == ""
+        # Standing target with idle cash: block.
+        agent.portfolio.cash = 32.0
+        assert agent._swing_block_symbol() == "AAVE"
+    finally:
+        agent.close()

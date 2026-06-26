@@ -205,3 +205,63 @@ def test_reconcile_skips_unreadable_leg(tmp_path, monkeypatch):
         assert agent.portfolio.positions["INJ"].qty == 4.0
     finally:
         agent.close()
+
+
+def test_reconcile_adopts_unbooked_onchain_holding(tmp_path, monkeypatch):
+    """A real holding the book lost track of (e.g. a redeploy dropped it from
+    saved state) is re-adopted from chain, so equity is not under-reported and the
+    drawdown halt cannot false-trip."""
+    agent = _fresh_agent(tmp_path)
+    try:
+        agent.settings.mode = "live"
+        agent.settings.scoring.mark_from_onchain = True
+        monkeypatch.setattr(type(agent.settings), "is_live", property(lambda self: True))
+        monkeypatch.setattr(onchain, "resolve_wallet", lambda s: "0xWALLET")
+
+        # Book holds only cash; chain holds cash + 0.7 AAVE the book forgot.
+        agent.portfolio.cash = 32.0
+        agent.portfolio.positions.clear()
+
+        def fake_holdings(s, wallet, symbols, client=None):
+            return {
+                "USDT": onchain.Holding("USDT", units=32.0, raw=0, decimals=18, ok=True),
+                "AAVE": onchain.Holding("AAVE", units=0.7, raw=0, decimals=18, ok=True),
+            }
+        monkeypatch.setattr(onchain, "wallet_holdings", fake_holdings)
+
+        actions: list = []
+        agent._reconcile_onchain({"AAVE": 85.0}, actions)
+
+        assert "AAVE" in agent.portfolio.positions
+        assert abs(agent.portfolio.positions["AAVE"].qty - 0.7) < 1e-9
+        assert agent.portfolio.positions["AAVE"].avg_entry == 85.0
+        # Wide protective stop (not a tight one that would dump the adopted name).
+        assert agent.portfolio.positions["AAVE"].stop_price < 85.0 * 0.85
+        assert any(a.kind == "reconcile" and "adopted" in a.detail for a in actions)
+    finally:
+        agent.close()
+
+
+def test_reconcile_does_not_adopt_dust(tmp_path, monkeypatch):
+    """A sub-dust on-chain balance is not adopted (gas-inefficient noise)."""
+    agent = _fresh_agent(tmp_path)
+    try:
+        agent.settings.mode = "live"
+        agent.settings.scoring.mark_from_onchain = True
+        monkeypatch.setattr(type(agent.settings), "is_live", property(lambda self: True))
+        monkeypatch.setattr(onchain, "resolve_wallet", lambda s: "0xWALLET")
+
+        agent.portfolio.cash = 10.0
+        agent.portfolio.positions.clear()
+
+        def fake_holdings(s, wallet, symbols, client=None):
+            return {
+                "USDT": onchain.Holding("USDT", units=10.0, raw=0, decimals=18, ok=True),
+                "AAVE": onchain.Holding("AAVE", units=0.000001, raw=0, decimals=18, ok=True),
+            }
+        monkeypatch.setattr(onchain, "wallet_holdings", fake_holdings)
+
+        agent._reconcile_onchain({"AAVE": 85.0}, [])
+        assert "AAVE" not in agent.portfolio.positions   # ~$0.00009 — left as dust
+    finally:
+        agent.close()
