@@ -17,6 +17,7 @@ State is persisted after each step so a week-long run survives restarts.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -104,6 +105,9 @@ class Agent:
             )
             p._day = date.fromisoformat(d["day"]) if d.get("day") else None
             p.positions = {s: Position(**pos) for s, pos in d.get("positions", {}).items()}
+            p.swing_armed = bool(d.get("swing_armed", False))
+            p.swing_sell_px = float(d.get("swing_sell_px", 0.0))
+            p.swing_token = str(d.get("swing_token", ""))
             return p
         except Exception:
             return None
@@ -121,6 +125,9 @@ class Agent:
             "trades_today": p.trades_today,
             "total_trades": p.total_trades,
             "positions": {s: asdict(pos) for s, pos in p.positions.items()},
+            "swing_armed": p.swing_armed,
+            "swing_sell_px": p.swing_sell_px,
+            "swing_token": p.swing_token,
         }
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, indent=2, default=str))
@@ -239,6 +246,7 @@ class Agent:
         self._save_snapshot(snap, posture)
 
         self._run_exits(prices, actions, dry_run)
+        self._run_swing(snap, prices, actions, dry_run, now)
         if not posture.halt_new_risk and not self.sentinel.kill_switch_engaged():
             self._run_rotation(snap, prices, posture, actions, dry_run, now)
             self._run_entries(snap, prices, posture, actions, dry_run, now)
@@ -347,6 +355,123 @@ class Agent:
             "used_fresh": used_fresh, "note": note,
         })
         return use_price
+    # --------------------------------------------------------- manual swing
+    def _run_swing(self, snap: SignalSnapshot, prices, actions, dry_run, now) -> None:
+        """Operator-directed take-profit + dip rebuy (OFF by default).
+
+        Lets a human fire a one-shot SELL of ``swing_symbol`` to cash via the
+        ``HELM_SWING_CMD`` env var (``verb#token`` — ``sell`` / ``buy`` / ``off``),
+        then auto-rebuys that name once it dips ``swing_rebuy_drop`` below the
+        realized sell price. Idempotent on the token, so a routine restart never
+        re-fires a stale command. While armed, ``_run_entries`` / ``_run_rotation``
+        are blocked from re-buying the name (the manual exit is not undone
+        underneath the operator). Every guardrail — Sentinel, stops, the DQ
+        floor, the drawdown taper, the kill-switch — still applies.
+        """
+        rc = self.settings.risk
+        sym = (getattr(rc, "swing_symbol", "") or "").upper()
+        if not getattr(rc, "swing_enabled", False) or not sym:
+            return
+        p = self.portfolio
+
+        # One-shot command: act only on a token we have not consumed yet.
+        cmd = (os.environ.get("HELM_SWING_CMD", "") or "").strip().lower()
+        if cmd:
+            verb, _, token = cmd.partition("#")
+            verb, token = verb.strip(), token.strip()
+            if token and token != p.swing_token:
+                p.swing_token = token  # consume up-front: never retry-storm a bad command
+                if verb == "sell":
+                    self._swing_sell(sym, snap, prices, actions, dry_run, now)
+                elif verb == "buy":
+                    self._swing_buy(sym, snap, prices, actions, dry_run, now, "swing_manual_buy")
+                elif verb == "off":
+                    p.swing_armed = False
+                    actions.append(Action("compliance", sym, "manual swing disarmed"))
+
+        # Passive: while armed, rebuy once price has dipped far enough below the sell.
+        if p.swing_armed and p.swing_sell_px > 0:
+            px = prices.get(sym)
+            if px is not None and px > 0 and px <= p.swing_sell_px * (1.0 - rc.swing_rebuy_drop):
+                self._swing_buy(sym, snap, prices, actions, dry_run, now, "swing_dip_rebuy")
+
+    def _swing_sell(self, sym, snap, prices, actions, dry_run, now) -> None:
+        """Liquidate the entire swing-symbol position to cash and arm the rebuy."""
+        p = self.portfolio
+        pos = p.positions.get(sym)
+        if pos is None or pos.qty <= 0:
+            actions.append(Action("blocked", sym, "manual swing sell: nothing held"))
+            return
+        ref = prices.get(sym, pos.avg_entry)
+        dec = self.sentinel.pre_exit(symbol=sym, qty=pos.qty, held_qty=pos.qty)
+        if not dec.approved:
+            actions.append(Action("blocked", sym, "manual swing sell vetoed by sentinel"))
+            return
+        if dry_run:
+            actions.append(Action("dry_run", sym, f"would manual-sell all @ {ref:.4f} + arm rebuy"))
+            return
+        order = Order(sym, "sell", ref_price=ref, qty=pos.qty,
+                      liquidity_usd=1e9, reason="swing_sell")
+        fill = self.executor.execute(order)
+        if not fill.ok or fill.qty <= 0:
+            self.ledger.append("alert", {"reason": "swing_sell_unfilled",
+                                          "symbol": sym, "note": fill.note[:80]})
+            actions.append(Action("blocked", sym, f"manual swing sell unfilled: {fill.note[:60]}"))
+            return
+        realized = p.apply_sell(fill)
+        p.swing_armed = True
+        p.swing_sell_px = fill.price
+        drop = self.settings.risk.swing_rebuy_drop
+        trigger = fill.price * (1.0 - drop)
+        self.ledger.append("trade", {**asdict(fill), "reason": "swing_sell",
+                                      "realized_pnl": round(realized, 4),
+                                      "armed_rebuy_below": round(trigger, 6)})
+        actions.append(Action("exit", sym,
+            f"manual-sell all @ {fill.price:.4f} pnl {realized:+.2f}; armed rebuy < {trigger:.4f}"))
+
+    def _swing_buy(self, sym, snap, prices, actions, dry_run, now, reason) -> None:
+        """Deploy available cash back into the swing symbol and disarm."""
+        p = self.portfolio
+        s = self.settings
+        if self.sentinel.kill_switch_engaged():
+            actions.append(Action("blocked", sym, "swing rebuy held: kill-switch engaged"))
+            return  # stay armed; retry once the circuit breaker clears
+        reserve = max(s.risk.gas_usd_per_swap, 0.0)
+        notional = p.cash - reserve
+        if notional < s.contest.dust_floor_usd:
+            actions.append(Action("blocked", sym, f"swing rebuy skipped: cash ${p.cash:.2f} too low"))
+            return
+        sig = next((x for x in snap.signals if x.symbol.upper() == sym), None)
+        ref = (sig.price if sig else None) or prices.get(sym, 0.0)
+        if not ref or ref <= 0:
+            actions.append(Action("blocked", sym, "swing rebuy skipped: no price"))
+            return
+        atr = sig.atr if (sig and sig.atr and sig.atr > 0) else 0.0
+        if dry_run:
+            p.swing_armed = False
+            actions.append(Action("dry_run", sym, f"would swing-rebuy ${notional:.2f} @ {ref:.4f}"))
+            return
+        exec_price = ref
+        if self._x402_ready():
+            exec_price = self._x402_prebuy(sym, ref, now)
+        order = Order(sym, "buy", ref_price=exec_price, notional_usd=notional,
+                      liquidity_usd=1e9, reason=reason)
+        fill = self.executor.execute(order)
+        if not fill.ok or fill.notional_usd <= 0 or fill.qty <= 0:
+            # Stay armed and retry next cycle rather than book a phantom buy.
+            self.ledger.append("alert", {"reason": reason + "_unfilled",
+                                          "symbol": sym, "note": fill.note[:80]})
+            actions.append(Action("blocked", sym, f"swing rebuy unfilled: {fill.note[:60]}"))
+            return
+        stop_dist = atr * s.risk.stop_loss_atr_mult if atr > 0 else fill.price * 0.06
+        stop = max(0.0, fill.price - stop_dist)
+        tp = fill.price + (atr * s.risk.take_profit_atr_mult if atr > 0 else fill.price * 0.10)
+        p.apply_buy(fill, stop, tp, stop_dist)
+        p.swing_armed = False
+        self.ledger.append("trade", {**asdict(fill), "reason": reason,
+                                      "stop": round(stop, 6), "tp": round(tp, 6)})
+        actions.append(Action("entry", sym,
+            f"swing-rebuy ${fill.notional_usd:.2f} @ {fill.price:.4f} ({reason})"))
 
     # ------------------------------------------------------------- rotation
     def _position_age_hours(self, pos: Position, now: datetime) -> float:
@@ -380,6 +505,13 @@ class Agent:
         ranked = snap.top(s.signals.top_n)
         if not ranked:
             return
+        swing_block = (rc.swing_symbol or "").upper() if self.portfolio.swing_armed else ""
+        if swing_block:
+            # Don't let rotation steer freed capital into a name the operator is
+            # deliberately holding in cash for a manual dip rebuy.
+            ranked = [x for x in ranked if x.symbol.upper() != swing_block]
+            if not ranked:
+                return
         equity = self.portfolio.equity(prices)
         if equity <= 0:
             return
@@ -461,7 +593,12 @@ class Agent:
         # Small reserve so sizing never targets the exact cap (equity drifts as
         # we fill above mid); avoids off-by-epsilon rejections at the boundary.
         reserve = 0.01 * gross_cap_usd
+        swing_block = (s.risk.swing_symbol or "").upper() if self.portfolio.swing_armed else ""
         for sig in snap.top(s.signals.top_n):
+            if swing_block and sig.symbol.upper() == swing_block:
+                # Manual swing has this name parked in cash awaiting its dip
+                # rebuy; never let the normal entry loop re-buy it underneath us.
+                continue
             held = self.portfolio.positions.get(sig.symbol)
             headroom = gross_cap_usd - start_gross - consumed - reserve
             # Never order past the USDT we actually hold. The endgame profile's

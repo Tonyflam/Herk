@@ -53,6 +53,10 @@ class Portfolio:
     gas_paid: float = 0.0
     trades_today: int = 0
     total_trades: int = 0
+    # Manual swing control (operator-directed); persisted across restarts.
+    swing_armed: bool = False        # True after a manual sell, waiting for the dip rebuy
+    swing_sell_px: float = 0.0       # realized price of the last manual swing sell
+    swing_token: str = ""            # last consumed HELM_SWING_CMD token (one-shot idempotency)
 
     @classmethod
     def new(cls, initial_equity: float) -> "Portfolio":

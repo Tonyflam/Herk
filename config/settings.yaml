@@ -81,10 +81,16 @@ risk:
   rotation_big_holding_frac: 0.45    # ...OR when a stale holding is >= this fraction of equity (regime change)
   rotation_min_stale_usd: 10.0       # never rotate a holding smaller than this (gas would dominate)
   rotation_topup_frac: 0.85          # treat the leader as underfunded if held below this x its max weight
-
-# ---------------------------------------------------------------------------
-# SIGNALS — cross-sectional momentum / relative strength + vol.
-# ---------------------------------------------------------------------------
+  # --- Manual swing control: operator-directed take-profit + dip rebuy --------
+  # OFF by default. When enabled, a human fires a one-shot SELL of swing_symbol
+  # to cash via the HELM_SWING_CMD env var (verb#token, e.g. sell#1); the agent
+  # then arms and auto-rebuys that name once it dips swing_rebuy_drop below the
+  # realized sell price. While armed, entries/rotation are blocked from re-buying
+  # it. Every guardrail (stops, DQ floor, drawdown taper, Sentinel, kill-switch)
+  # still applies. Enabled only on the live `max` profile below.
+  swing_enabled: false
+  swing_symbol: ""                    # name under manual swing control (e.g. "AAVE")
+  swing_rebuy_drop: 0.02             # rebuy once price <= sell_px * (1 - this)
 signals:
   lookbacks_hours: [6, 24, 72, 168]      # multi-horizon momentum
   momentum_weights: [0.15, 0.35, 0.30, 0.20]
@@ -247,6 +253,12 @@ profiles:
       daily_loss_limit_pct: 20.0
       per_trade_risk_pct: 5.0
       take_profit_atr_mult: 8.0
+      # Manual swing lever, live-armed: lets the operator take profit on the
+      # leader on command and auto-rebuy the dip. Idle until HELM_SWING_CMD is
+      # set; all guardrails stay in force.
+      swing_enabled: true
+      swing_symbol: "AAVE"
+      swing_rebuy_drop: 0.02
     signals:
       min_composite_score: 0.06
       top_n: 1                            # hold only the #1 relative-strength leader (fattest right tail)

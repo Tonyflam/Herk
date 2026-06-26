@@ -102,6 +102,17 @@ class RiskCfg:
     rotation_big_holding_frac: float = 0.45  # OR the stale name is >= this fraction of equity
     rotation_min_stale_usd: float = 10.0     # never rotate a holding smaller than this (gas-inefficient)
     rotation_topup_frac: float = 0.85        # leader is "underfunded" if held < this x its max target
+    # --- Manual swing control (operator-directed take-profit + dip rebuy) ---
+    # OFF by default. When enabled, the operator can fire a one-shot SELL of
+    # ``swing_symbol`` to cash via the HELM_SWING_CMD env var (verb#token, e.g.
+    # ``sell#1``); the agent then "arms" and auto-rebuys the same name once it
+    # dips ``swing_rebuy_drop`` below the realized sell price. While armed the
+    # normal entry/rotation logic is blocked from re-buying that name (so the
+    # manual exit is not instantly undone). Every guardrail (stops, DQ floor,
+    # drawdown taper, Sentinel) still applies to the rebuy.
+    swing_enabled: bool = False
+    swing_symbol: str = ""                    # name under manual swing control (e.g. "AAVE")
+    swing_rebuy_drop: float = 0.02           # rebuy once price <= sell_px * (1 - this)
 
 
 @dataclass
