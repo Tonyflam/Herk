@@ -113,6 +113,23 @@ class RiskCfg:
     swing_enabled: bool = False
     swing_symbol: str = ""                    # name under manual swing control (e.g. "AAVE")
     swing_rebuy_drop: float = 0.02           # rebuy once price <= sell_px * (1 - this)
+    # --- Volatility harvester (autonomous sell-the-rip / buy-the-dip grid) ---
+    # OFF by default. When enabled on the swing symbol, HELM runs a symmetric
+    # fixed-slice grid off a moving anchor price: once price rises a full
+    # ``harvest_step_pct`` it BANKS ``harvest_trade_frac`` of the position into
+    # USDT (locking realized profit -- the "profit guard" the field's winners
+    # use); once price falls a full step it BUYS with ``harvest_trade_frac`` of
+    # idle cash (accumulating cheaper). Because each leg only ever trades a
+    # fraction, a core position (rides winners) and a cash reserve (funds the
+    # next dip) always remain. Selling de-risks; buys spend only on-hand cash
+    # (never leverage), so the 30% DQ gate, survival taper and kill-switch all
+    # stay in force. The band and slice are live-tunable via HELM_HARVEST_STEP /
+    # HELM_HARVEST_FRAC for endgame retuning without a redeploy.
+    harvest_enabled: bool = False
+    harvest_step_pct: float = 0.035           # band: act once px moves this far from the moving anchor
+    harvest_trade_frac: float = 0.20          # slice per cross: frac of position to bank on a rip,
+                                              # or frac of idle cash to deploy on a dip
+    harvest_min_trade_usd: float = 4.0        # skip harvest trades smaller than this (gas efficiency)
 
 
 @dataclass

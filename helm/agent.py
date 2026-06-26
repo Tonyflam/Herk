@@ -108,6 +108,7 @@ class Agent:
             p.swing_armed = bool(d.get("swing_armed", False))
             p.swing_sell_px = float(d.get("swing_sell_px", 0.0))
             p.swing_token = str(d.get("swing_token", ""))
+            p.harvest_anchor_px = float(d.get("harvest_anchor_px", 0.0))
             return p
         except Exception:
             return None
@@ -128,6 +129,7 @@ class Agent:
             "swing_armed": p.swing_armed,
             "swing_sell_px": p.swing_sell_px,
             "swing_token": p.swing_token,
+            "harvest_anchor_px": p.harvest_anchor_px,
         }
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, indent=2, default=str))
@@ -247,6 +249,7 @@ class Agent:
 
         self._run_exits(prices, actions, dry_run)
         self._run_swing(snap, prices, actions, dry_run, now)
+        self._run_harvest(snap, prices, posture, actions, dry_run, now)
         if not posture.halt_new_risk and not self.sentinel.kill_switch_engaged():
             self._run_rotation(snap, prices, posture, actions, dry_run, now)
             self._run_entries(snap, prices, posture, actions, dry_run, now)
@@ -444,6 +447,10 @@ class Agent:
         sym = (getattr(rc, "swing_symbol", "") or "").upper()
         if not sym:
             return ""
+        # The autonomous harvester owns the swing symbol's whole inventory, so
+        # keep the normal entry/rotation engine off it entirely while harvesting.
+        if getattr(rc, "harvest_enabled", False):
+            return sym
         p = self.portfolio
         if p.swing_armed:
             return sym                               # armed after a sell: never re-buy
@@ -530,6 +537,134 @@ class Agent:
                                       "stop": round(stop, 6), "tp": round(tp, 6)})
         actions.append(Action("entry", sym,
             f"swing-rebuy ${fill.notional_usd:.2f} @ {fill.price:.4f} ({reason})"))
+
+    # ------------------------------------------------------- harvester
+    def _harvest_param(self, env: str, default: float, lo: float, hi: float) -> float:
+        """Read a live-tunable harvester knob from ``env``, clamped to [lo, hi].
+
+        Lets the operator retune the grid mid-contest (e.g. widen the band or
+        raise the cash reserve for the endgame) without a code redeploy. A
+        missing or unparseable value falls back to the profile default.
+        """
+        raw = (os.environ.get(env, "") or "").strip()
+        if raw:
+            try:
+                default = float(raw)
+            except ValueError:
+                pass
+        return max(lo, min(hi, default))
+
+    def _run_harvest(self, snap: SignalSnapshot, prices, posture, actions, dry_run, now) -> None:
+        """Autonomous volatility harvester on the swing symbol (sell rips / buy dips).
+
+        A symmetric fixed-slice grid off a moving anchor — the same "profit
+        guard" mechanic the field's leaders use. Once price rises a full
+        ``harvest_step_pct`` from the anchor HELM BANKS ``harvest_trade_frac`` of
+        the position into USDT (realized profit that can never be round-tripped
+        away); once price falls a full step it BUYS with that fraction of idle
+        cash (accumulating cheaper units). Because each leg only ever trades a
+        fraction, a decaying core (rides a winner) and a cash reserve (funds the
+        next dip) always remain.
+
+        Banking runs before the halt gate so rips are always locked in even under
+        a cautious posture; dip-buys are gated by the drawdown halt and the
+        kill-switch and only ever spend on-hand cash (never leverage), so the 30%
+        DQ gate, the survival taper and the kill-switch all stay in force.
+        """
+        rc = self.settings.risk
+        if not getattr(rc, "harvest_enabled", False):
+            return
+        sym = (getattr(rc, "swing_symbol", "") or "").upper()
+        if not sym:
+            return
+        p = self.portfolio
+        if p.swing_armed:                 # don't fight an in-flight manual swing
+            return
+        px = prices.get(sym)
+        if not px or px <= 0:
+            return
+
+        step = self._harvest_param("HELM_HARVEST_STEP", rc.harvest_step_pct, 0.005, 0.5)
+        anchor = p.harvest_anchor_px
+        # First sight (or a lost anchor after state churn): arm the grid at the
+        # current price without forcing a trade — preserves upside.
+        if anchor <= 0:
+            p.harvest_anchor_px = px
+            return
+        if px >= anchor * (1.0 + step):
+            p.harvest_anchor_px = px                       # rip: bank a slice
+            self._harvest_bank(sym, px, actions, dry_run)
+        elif px <= anchor * (1.0 - step):
+            p.harvest_anchor_px = px                       # dip: buy a slice
+            self._harvest_dip(sym, px, posture, snap, prices, actions, dry_run, now)
+
+    def _harvest_min_trade(self) -> float:
+        """Smallest harvest notional worth the gas (never below the dust floor)."""
+        return max(self.settings.contest.dust_floor_usd,
+                   float(getattr(self.settings.risk, "harvest_min_trade_usd", 4.0)))
+
+    def _harvest_bank(self, sym, px, actions, dry_run) -> None:
+        """Bank a fixed slice of the position into USDT on a rip (locks profit)."""
+        rc = self.settings.risk
+        p = self.portfolio
+        pos = p.positions.get(sym)
+        if pos is None or pos.qty <= 0:
+            return
+        frac = self._harvest_param("HELM_HARVEST_FRAC", rc.harvest_trade_frac, 0.02, 0.90)
+        units = pos.qty * frac
+        if units * px < self._harvest_min_trade():
+            return
+        if dry_run:
+            actions.append(Action("dry_run", sym, f"would harvest-bank {units:.6f} @ {px:.4f}"))
+            return
+        order = Order(sym, "sell", ref_price=px, qty=units, liquidity_usd=1e9, reason="harvest_sell")
+        fill = self.executor.execute(order)
+        if not fill.ok or fill.qty <= 0:
+            self.ledger.append("alert", {"reason": "harvest_sell_unfilled",
+                                          "symbol": sym, "note": fill.note[:80]})
+            return
+        realized = p.apply_sell(fill)
+        self.ledger.append("trade", {**asdict(fill), "reason": "harvest_sell",
+                                      "realized_pnl": round(realized, 4)})
+        actions.append(Action("exit", sym,
+            f"harvest-bank ${fill.notional_usd:.2f} @ {fill.price:.4f} pnl {realized:+.2f}"))
+
+    def _harvest_dip(self, sym, px, posture, snap, prices, actions, dry_run, now) -> None:
+        """Deploy a fixed slice of idle cash into the symbol on a dip."""
+        rc = self.settings.risk
+        p = self.portfolio
+        # Buys respect the halt + kill-switch and only ever spend on-hand cash.
+        if getattr(posture, "halt_new_risk", False) or self.sentinel.kill_switch_engaged():
+            return
+        frac = self._harvest_param("HELM_HARVEST_FRAC", rc.harvest_trade_frac, 0.02, 0.90)
+        idle_cash = max(0.0, p.cash - max(rc.gas_usd_per_swap, 0.0))
+        spend = idle_cash * frac
+        if spend < self._harvest_min_trade():
+            return
+        if dry_run:
+            actions.append(Action("dry_run", sym, f"would harvest-dip ${spend:.2f} @ {px:.4f}"))
+            return
+        sig = next((x for x in snap.signals if x.symbol.upper() == sym), None)
+        exec_price = (sig.price if sig else None) or px
+        if self._x402_ready():
+            exec_price = self._x402_prebuy(sym, exec_price, now)
+        order = Order(sym, "buy", ref_price=exec_price, notional_usd=spend,
+                      liquidity_usd=1e9, reason="harvest_buy")
+        fill = self.executor.execute(order)
+        if not fill.ok or fill.notional_usd <= 0 or fill.qty <= 0:
+            self.ledger.append("alert", {"reason": "harvest_buy_unfilled",
+                                          "symbol": sym, "note": fill.note[:80]})
+            return
+        # Wide protective stop so the accumulated core is never noise-stopped — the
+        # harvester itself manages profit-taking; this is only catastrophe cover.
+        stop_dist = fill.price * 0.20
+        stop = max(0.0, fill.price - stop_dist)
+        tp = fill.price * 1.50
+        p.apply_buy(fill, stop, tp, stop_dist)
+        self.ledger.append("trade", {**asdict(fill), "reason": "harvest_buy",
+                                      "stop": round(stop, 6), "tp": round(tp, 6)})
+        actions.append(Action("entry", sym,
+            f"harvest-dip ${fill.notional_usd:.2f} @ {fill.price:.4f}"))
 
     # ------------------------------------------------------------- rotation
     def _position_age_hours(self, pos: Position, now: datetime) -> float:

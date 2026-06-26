@@ -57,6 +57,8 @@ class Portfolio:
     swing_armed: bool = False        # True after a manual sell, waiting for the dip rebuy
     swing_sell_px: float = 0.0       # realized price of the last manual swing sell
     swing_token: str = ""            # last consumed HELM_SWING_CMD token (one-shot idempotency)
+    # Volatility harvester (autonomous grid on the swing symbol); persisted.
+    harvest_anchor_px: float = 0.0   # moving reference price for the next harvest band cross
 
     @classmethod
     def new(cls, initial_equity: float) -> "Portfolio":

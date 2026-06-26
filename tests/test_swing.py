@@ -435,3 +435,303 @@ def test_block_symbol_helper_states(tmp_path, monkeypatch):
         assert agent._swing_block_symbol() == "AAVE"
     finally:
         agent.close()
+
+
+# ============================================================================
+# Volatility harvester: autonomous sell-the-rip / buy-the-dip fixed-slice grid.
+#
+# A symmetric grid off a moving anchor price. Once price rises a full
+# ``harvest_step_pct`` it banks ``harvest_trade_frac`` of the position into USDT
+# (locking realized profit -- the "profit guard" the leaders use); once price
+# falls a full step it buys with that fraction of idle cash. A decaying core and
+# a cash reserve always remain. These tests pin the contract that keeps it both
+# effective and DQ-safe.
+# ============================================================================
+def _hsettings(**risk_overrides):
+    """Balanced profile with the harvester enabled on AAVE (overridable)."""
+    base = dict(harvest_enabled=True, harvest_step_pct=0.035,
+                harvest_trade_frac=0.20, harvest_min_trade_usd=4.0)
+    base.update(risk_overrides)
+    return _settings(**base)
+
+
+def _hagent(tmp_path, monkeypatch, **risk_overrides) -> Agent:
+    """Harvester-enabled agent with all swing/harvest env knobs cleared."""
+    for var in ("HELM_SWING_CMD", "HELM_SWING_REBUY_PX",
+                "HELM_HARVEST_STEP", "HELM_HARVEST_FRAC"):
+        monkeypatch.delenv(var, raising=False)
+    return _agent(tmp_path, _hsettings(**risk_overrides))
+
+
+def _halted_posture() -> SimpleNamespace:
+    return SimpleNamespace(max_gross_pct=1.20, per_trade_risk_pct=4.0,
+                           halt_new_risk=True, posture="halt")
+
+
+def test_harvest_first_sight_arms_anchor_without_trading(tmp_path, monkeypatch):
+    """The first cycle just records the anchor at the current price -- no trade,
+    so the agent's upside is never reduced by merely turning the grid on."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0)])
+        assert agent.portfolio.harvest_anchor_px == 0.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 86.0)])
+        agent._run_harvest(snap, {"AAVE": 86.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.harvest_anchor_px == 86.0       # armed at current px
+        assert abs(agent.portfolio.positions["AAVE"].qty - 1.0) < 1e-9   # untouched
+        assert actions == []                                   # no trade fired
+    finally:
+        agent.close()
+
+
+def test_harvest_banks_a_slice_on_a_rip(tmp_path, monkeypatch):
+    """A full up-step banks a fixed slice into USDT and locks realized profit."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 90.0)])
+        agent._run_harvest(snap, {"AAVE": 90.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.harvest_anchor_px == 90.0          # anchor advanced
+        assert abs(agent.portfolio.positions["AAVE"].qty - 0.80) < 0.02  # ~20% banked
+        assert agent.portfolio.cash > 15.0                        # USDT proceeds in hand
+        banks = [a for a in actions if a.kind == "exit" and "harvest-bank" in a.detail]
+        assert banks and "pnl +" in banks[0].detail               # realized gain locked
+    finally:
+        agent.close()
+
+
+def test_harvest_buys_a_slice_on_a_dip(tmp_path, monkeypatch):
+    """A full down-step deploys a fixed slice of idle cash into more of the name."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=40.0, positions=[_pos("AAVE", qty=0.5, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 82.0)])
+        agent._run_harvest(snap, {"AAVE": 82.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.harvest_anchor_px == 82.0
+        assert agent.portfolio.positions["AAVE"].qty > 0.5        # accumulated cheaper
+        assert agent.portfolio.cash < 35.0                        # idle cash deployed
+        assert any(a.kind == "entry" and "harvest-dip" in a.detail for a in actions)
+    finally:
+        agent.close()
+
+
+def test_harvest_holds_inside_the_band(tmp_path, monkeypatch):
+    """A sub-step wiggle does nothing: no trade and the anchor stays put."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=40.0, positions=[_pos("AAVE", qty=0.5, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 87.0)])          # +1.16% < 3.5% band
+        agent._run_harvest(snap, {"AAVE": 87.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.harvest_anchor_px == 86.0          # anchor unchanged
+        assert abs(agent.portfolio.positions["AAVE"].qty - 0.5) < 1e-9
+        assert actions == []
+    finally:
+        agent.close()
+
+
+def test_harvest_disabled_is_a_no_op(tmp_path, monkeypatch):
+    """With the harvester off, even a big move never touches the book."""
+    agent = _hagent(tmp_path, monkeypatch, harvest_enabled=False)
+    try:
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 95.0)])
+        agent._run_harvest(snap, {"AAVE": 95.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 1.0) < 1e-9
+        assert actions == []
+    finally:
+        agent.close()
+
+
+def test_harvest_banks_even_when_halted(tmp_path, monkeypatch):
+    """Banking a rip is NOT gated by the drawdown halt -- gains are always locked
+    in (selling only ever reduces risk)."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 90.0)])
+        agent._run_harvest(snap, {"AAVE": 90.0}, _halted_posture(), actions, dry_run=False, now=_NOW)
+
+        assert agent.portfolio.positions["AAVE"].qty < 0.95       # still banked
+        assert any(a.kind == "exit" and "harvest-bank" in a.detail for a in actions)
+    finally:
+        agent.close()
+
+
+def test_harvest_dip_buy_blocked_when_halted(tmp_path, monkeypatch):
+    """A dip-buy IS gated: under a halt no new risk is added (the anchor still
+    advances so the grid resumes cleanly once the halt clears)."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=40.0, positions=[_pos("AAVE", qty=0.5, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 82.0)])
+        agent._run_harvest(snap, {"AAVE": 82.0}, _halted_posture(), actions, dry_run=False, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 0.5) < 1e-9   # no buy
+        assert agent.portfolio.cash == 40.0
+        assert not any(a.kind == "entry" for a in actions)
+    finally:
+        agent.close()
+
+
+def test_harvest_dip_buy_blocked_by_kill_switch(tmp_path, monkeypatch):
+    """The kill-switch also blocks dip-buys (no new risk while tripped)."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        agent.sentinel.kill_switch_engaged = lambda: True  # type: ignore[assignment]
+        _book(agent, cash=40.0, positions=[_pos("AAVE", qty=0.5, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 82.0)])
+        agent._run_harvest(snap, {"AAVE": 82.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 0.5) < 1e-9
+        assert not any(a.kind == "entry" for a in actions)
+    finally:
+        agent.close()
+
+
+def test_harvest_skips_trades_below_gas_floor(tmp_path, monkeypatch):
+    """A slice worth less than ``harvest_min_trade_usd`` is skipped (gas economy),
+    while the anchor still advances past the level."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        # 20% of 0.1 units @ ~90 ~= $1.8 -- below the $4 floor.
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=0.1, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 90.0)])
+        agent._run_harvest(snap, {"AAVE": 90.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 0.1) < 1e-9   # not sold
+        assert agent.portfolio.harvest_anchor_px == 90.0                 # but advanced
+        assert actions == []
+    finally:
+        agent.close()
+
+
+def test_harvest_armed_swing_short_circuits(tmp_path, monkeypatch):
+    """While a manual swing is armed the harvester stands down entirely (it never
+    fights an operator-directed swing), leaving even the anchor untouched."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        agent.portfolio.swing_armed = True
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 90.0)])
+        agent._run_harvest(snap, {"AAVE": 90.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 1.0) < 1e-9
+        assert agent.portfolio.harvest_anchor_px == 86.0
+        assert actions == []
+    finally:
+        agent.close()
+
+
+def test_harvest_anchor_persists_across_restart(tmp_path, monkeypatch):
+    """The moving anchor survives a reload so the grid is continuous across the
+    agent's frequent restarts."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=10.0, positions=[_pos("AAVE", qty=0.5, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 87.53
+        agent._save_state()
+    finally:
+        agent.close()
+
+    restored = _hagent(tmp_path, monkeypatch)
+    try:
+        assert restored.portfolio.harvest_anchor_px == 87.53
+    finally:
+        restored.close()
+
+
+def test_harvest_owns_swing_symbol_in_block_helper(tmp_path, monkeypatch):
+    """When harvesting, the symbol is blocked from the normal entry/rotation
+    engine unconditionally -- the grid owns its whole inventory."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        # No swing armed, no standing target, sub-dust cash: only harvest ownership
+        # can produce a block here.
+        _book(agent, cash=0.20, positions=[_pos("AAVE", qty=0.5, price=86.0)])
+        assert agent.portfolio.swing_armed is False
+        assert agent._swing_block_symbol() == "AAVE"
+    finally:
+        agent.close()
+
+
+def test_harvest_dry_run_only_previews(tmp_path, monkeypatch):
+    """In dry-run mode the harvester reports intent but never fills."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 90.0)])
+        agent._run_harvest(snap, {"AAVE": 90.0}, _posture(), actions, dry_run=True, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 1.0) < 1e-9   # no fill
+        assert any(a.kind == "dry_run" and "would harvest-bank" in a.detail for a in actions)
+    finally:
+        agent.close()
+
+
+def test_harvest_param_reads_and_clamps_env(tmp_path, monkeypatch):
+    """Live env knobs override the profile default and are clamped to safe bounds;
+    a bad value falls back to the default."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        # In-range override is honoured.
+        monkeypatch.setenv("HELM_HARVEST_STEP", "0.10")
+        assert abs(agent._harvest_param("HELM_HARVEST_STEP", 0.035, 0.005, 0.5) - 0.10) < 1e-9
+        # Out-of-range is clamped.
+        monkeypatch.setenv("HELM_HARVEST_STEP", "0.0001")
+        assert abs(agent._harvest_param("HELM_HARVEST_STEP", 0.035, 0.005, 0.5) - 0.005) < 1e-9
+        monkeypatch.setenv("HELM_HARVEST_FRAC", "5")
+        assert abs(agent._harvest_param("HELM_HARVEST_FRAC", 0.20, 0.02, 0.90) - 0.90) < 1e-9
+        # Garbage falls back to the default.
+        monkeypatch.setenv("HELM_HARVEST_FRAC", "notanumber")
+        assert abs(agent._harvest_param("HELM_HARVEST_FRAC", 0.20, 0.02, 0.90) - 0.20) < 1e-9
+        # Unset uses the default.
+        monkeypatch.delenv("HELM_HARVEST_FRAC", raising=False)
+        assert abs(agent._harvest_param("HELM_HARVEST_FRAC", 0.20, 0.02, 0.90) - 0.20) < 1e-9
+    finally:
+        agent.close()
+
+
+def test_harvest_frac_env_override_resizes_slice(tmp_path, monkeypatch):
+    """A live HELM_HARVEST_FRAC change resizes the banked slice without a redeploy."""
+    agent = _hagent(tmp_path, monkeypatch)
+    try:
+        monkeypatch.setenv("HELM_HARVEST_FRAC", "0.50")
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 90.0)])
+        agent._run_harvest(snap, {"AAVE": 90.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        # 50% slice banked -> roughly half the position sold.
+        assert abs(agent.portfolio.positions["AAVE"].qty - 0.50) < 0.03
+        assert any(a.kind == "exit" and "harvest-bank" in a.detail for a in actions)
+    finally:
+        agent.close()
+

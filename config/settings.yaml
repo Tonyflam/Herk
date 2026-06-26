@@ -91,6 +91,14 @@ risk:
   swing_enabled: false
   swing_symbol: ""                    # name under manual swing control (e.g. "AAVE")
   swing_rebuy_drop: 0.02             # rebuy once price <= sell_px * (1 - this)
+  # --- Volatility harvester: autonomous sell-rip / buy-dip fixed-slice grid on
+  # swing_symbol. OFF by default; enabled on the live `max` profile. Banks a
+  # slice of the position into USDT on every rip and deploys a slice of idle
+  # cash on every dip while always keeping a core + cash reserve.
+  harvest_enabled: false
+  harvest_step_pct: 0.035            # act once price moves this far from the anchor
+  harvest_trade_frac: 0.20          # slice per cross (frac of position / idle cash)
+  harvest_min_trade_usd: 4.0        # skip harvest trades smaller than this (gas)
 signals:
   lookbacks_hours: [6, 24, 72, 168]      # multi-horizon momentum
   momentum_weights: [0.15, 0.35, 0.30, 0.20]
@@ -259,6 +267,16 @@ profiles:
       swing_enabled: true
       swing_symbol: "AAVE"
       swing_rebuy_drop: 0.02
+      # Autonomous volatility harvester -- the proven "profit guard" the leaders
+      # run: bank a slice of the position into USDT on every rip, buy a slice with
+      # idle cash on every dip, always keep a decaying core + cash reserve. Turns
+      # a static long into an oscillation harvester so AAVE's chop becomes locked
+      # realized gains instead of being round-tripped. Live-tunable without a
+      # redeploy: HELM_HARVEST_STEP (band) / HELM_HARVEST_FRAC (slice size).
+      harvest_enabled: true
+      harvest_step_pct: 0.035
+      harvest_trade_frac: 0.20
+      harvest_min_trade_usd: 4.0
     signals:
       min_composite_score: 0.06
       top_n: 1                            # hold only the #1 relative-strength leader (fattest right tail)
