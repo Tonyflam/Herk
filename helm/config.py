@@ -151,6 +151,13 @@ class SignalsCfg:
     net_of_cost_gate: bool = True
     rebalance_interval_min: int = 60
     top_n: int = 3
+    # Volatility (grid-fuel) tilt on the composite. Our harvester is a grid:
+    # it earns from price *range*, yet vol-adjusted momentum alone penalises the
+    # very volatility that fuels it. When >0, add ``vol_tilt_weight × z(atr_pct)``
+    # to each composite so high-range liquid names (the best grid fuel) surface
+    # ahead of calm ones — a volatility-first selection. 0.0 => composite
+    # unchanged (default; backtests byte-identical).
+    vol_tilt_weight: float = 0.0
 
 
 @dataclass

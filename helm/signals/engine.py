@@ -121,6 +121,20 @@ class SignalEngine:
                     z = float(zs[pos]) if pos < len(zs) else 0.0
                     rows[k].composite += weights[j] * z
 
+            # ---- Volatility (grid-fuel) tilt --------------------------------
+            # A harvester/grid earns from price *range*; vol-adjusted momentum
+            # above divides return by vol, penalising the very volatility that
+            # fuels it. When enabled, add a z-scored ATR% term so high-range
+            # liquid names (best grid fuel) rank ahead of calm ones — a
+            # volatility-first selection. Weight 0 leaves the composite untouched.
+            vt = s.signals.vol_tilt_weight
+            if vt:
+                atrp = [rows[k].atr_pct for k in idx_with_data]
+                zv = M.zscore(atrp)
+                for pos, k in enumerate(idx_with_data):
+                    z = float(zv[pos]) if pos < len(zv) else 0.0
+                    rows[k].composite += vt * z
+
         # ---- Stage 3: gates ---------------------------------------------
         cost_bps = s.risk.fee_bps_roundtrip + s.risk.slippage_bps_max
         min_liq = s.risk.min_liquidity_usd

@@ -292,6 +292,17 @@ profiles:
                                           # banks gains. The competitors ahead are frozen in
                                           # cash, so return from a 2nd strong name climbs the
                                           # ladder directly without single-name blow-up risk.
+      vol_tilt_weight: 0.7                # grid-fuel tilt: our harvester IS a grid (earns from
+                                          # price RANGE), yet vol-adjusted momentum penalises the
+                                          # very volatility that fuels it. Add z(atr%)×0.7 to the
+                                          # composite so the most volatile liquid name (XPL, a
+                                          # +3σ range outlier) ranks at/above calm AAVE — a
+                                          # volatility-FIRST selection (the proven edge of the
+                                          # leader's grid). The rebalance then seeds a diversified
+                                          # ~50/50 AAVE+XPL book (capped at equity/top_n, never
+                                          # all-in) where both the harvester and the directional
+                                          # upside live. Live sweep 2026-06-26: 0.7 is the flip
+                                          # threshold — XPL 3.40 > AAVE 3.24 (+0.17), top-2 = XPL+AAVE.
     universe:
       # Endgame: widen the agent's eyes beyond the curated majors to include the
       # single strongest liquid high-beta mover in the eligible set. XPL verified

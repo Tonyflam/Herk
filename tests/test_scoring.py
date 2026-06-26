@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from helm.agent import Agent
 from helm.data import onchain, routes
 
@@ -265,3 +267,136 @@ def test_reconcile_does_not_adopt_dust(tmp_path, monkeypatch):
         assert "AAVE" not in agent.portfolio.positions   # ~$0.00009 — left as dust
     finally:
         agent.close()
+
+
+# ------------------------------------------------- volatility (grid-fuel) tilt
+def _balanced_settings():
+    """Load the balanced profile deterministically, regardless of any ambient
+    ``HELM_PROFILE`` pinned in ``.env`` (the live contest stages ``max``)."""
+    import os
+
+    from helm.config import load_settings
+
+    prev = os.environ.get("HELM_PROFILE")
+    os.environ["HELM_PROFILE"] = "balanced"
+    try:
+        return load_settings()
+    finally:
+        if prev is None:
+            os.environ.pop("HELM_PROFILE", None)
+        else:
+            os.environ["HELM_PROFILE"] = prev
+
+
+class _CandleMarket:
+    """MarketData stand-in feeding the SignalEngine canned candles/quotes/regime."""
+
+    def __init__(self, series, quotes, regime):
+        self._series = series      # {sym: Candles}
+        self._quotes = quotes      # {sym: quote-like}
+        self._regime = regime
+
+    def get_candles(self, sym, interval="1h", limit=200):
+        return self._series[sym]
+
+    def get_quote(self, sym):
+        return self._quotes[sym]
+
+    def get_regime(self):
+        return self._regime
+
+    def close(self):
+        pass
+
+
+def _candle_series(sym, closes, range_frac):
+    """Synthetic 1h candles: smooth closes wrapped in a fixed intrabar range so
+    the realized high/low (hence ATR%) is controlled independently of drift."""
+    from helm.data.sources import Candles, Provenance
+    rows = []
+    for i, c in enumerate(closes):
+        hi = c * (1.0 + range_frac / 2.0)
+        lo = c * (1.0 - range_frac / 2.0)
+        rows.append((i * 3_600_000, c, hi, lo, c, 1_000.0))
+    return Candles(symbol=sym, interval="1h", rows=rows,
+                   provenance=Provenance("test", ok=True))
+
+
+def test_vol_tilt_promotes_the_volatile_grid_fuel_name():
+    """The harvester is a grid: it earns from price *range*, yet vol-adjusted
+    momentum alone ranks the calm, lower-range name ahead of the volatile mover.
+    ``vol_tilt_weight`` adds a z-scored ATR% term so the high-range name (best
+    grid fuel) is promoted — and can overtake the calm leader. Live the tilt is
+    0.6 against a 17-name cross-section where the mover (XPL) is a +3σ ATR%
+    outlier; this 2-name unit pins the *mechanism* with a larger weight.
+    """
+    import math
+    from dataclasses import replace
+
+    from helm.signals.engine import SignalEngine
+
+    s = _balanced_settings()  # fresh instance — safe to mutate (not the shared fixture)
+
+    n = 200
+    # CALM: higher drift (+12%), razor-thin intrabar range -> low ATR%.
+    # VOLA: lower drift (+6%), wide intrabar range -> high ATR%. A faint shared
+    # wiggle keeps close-to-close vol strictly positive for both.
+    calm = [100.0 * (1 + 0.12 * i / (n - 1)) + 0.05 * math.sin(i / 2.0) for i in range(n)]
+    vola = [100.0 * (1 + 0.06 * i / (n - 1)) + 0.05 * math.sin(i / 2.0) for i in range(n)]
+    series = {"CALM": _candle_series("CALM", calm, 0.004),
+              "VOLA": _candle_series("VOLA", vola, 0.06)}
+    quotes = {
+        "CALM": SimpleNamespace(price=calm[-1], volume_24h_usd=1e8,
+                                provenance=SimpleNamespace(ok=True, source="test")),
+        "VOLA": SimpleNamespace(price=vola[-1], volume_24h_usd=1e8,
+                                provenance=SimpleNamespace(ok=True, source="test")),
+    }
+    regime = SimpleNamespace(fear_greed=50, btc_dominance=50.0,
+                             funding_annual=None, sources={})
+    market = _CandleMarket(series, quotes, regime)
+
+    # --- tilt OFF: vol-adjusted momentum favours the calm, higher-drift name ---
+    s.signals = replace(s.signals, vol_tilt_weight=0.0)
+    base = {r.symbol: r for r in SignalEngine(s, market).compute(["CALM", "VOLA"]).signals}
+    assert base["VOLA"].atr_pct > base["CALM"].atr_pct          # VOLA is the volatile one
+    assert base["CALM"].composite > base["VOLA"].composite      # the bug: calm name wins
+
+    # --- tilt ON: the high-range grid-fuel name is promoted and overtakes ---
+    s.signals = replace(s.signals, vol_tilt_weight=1.5)
+    tilt = {r.symbol: r for r in SignalEngine(s, market).compute(["CALM", "VOLA"]).signals}
+    assert tilt["VOLA"].composite > tilt["CALM"].composite      # tilt flips the leader
+    # and the tilt strictly widens VOLA's standing vs the untilted baseline
+    base_edge = base["VOLA"].composite - base["CALM"].composite
+    tilt_edge = tilt["VOLA"].composite - tilt["CALM"].composite
+    assert tilt_edge > base_edge
+
+
+def test_vol_tilt_zero_leaves_composite_unchanged():
+    """Default ``vol_tilt_weight=0`` must not perturb the composite at all
+    (keeps every existing backtest and the balanced profile byte-identical)."""
+    import math
+
+    from helm.signals.engine import SignalEngine
+
+    s = _balanced_settings()
+    assert s.signals.vol_tilt_weight == 0.0  # default off (balanced/backtests)
+
+    n = 200
+    a = [100.0 * (1 + 0.10 * i / (n - 1)) + 0.05 * math.sin(i / 2.0) for i in range(n)]
+    b = [100.0 * (1 + 0.04 * i / (n - 1)) + 0.05 * math.sin(i / 3.0) for i in range(n)]
+    series = {"A": _candle_series("A", a, 0.01), "B": _candle_series("B", b, 0.05)}
+    quotes = {
+        "A": SimpleNamespace(price=a[-1], volume_24h_usd=1e8,
+                             provenance=SimpleNamespace(ok=True, source="test")),
+        "B": SimpleNamespace(price=b[-1], volume_24h_usd=1e8,
+                             provenance=SimpleNamespace(ok=True, source="test")),
+    }
+    regime = SimpleNamespace(fear_greed=50, btc_dominance=50.0,
+                             funding_annual=None, sources={})
+    market = _CandleMarket(series, quotes, regime)
+
+    rows = {r.symbol: r for r in SignalEngine(s, market).compute(["A", "B"]).signals}
+    # With tilt off, composite is purely the cross-sectional momentum z-blend:
+    # two names => exact ±0.707 split, no ATR% contribution.
+    assert rows["A"].composite == pytest.approx(-rows["B"].composite)
+    assert abs(rows["A"].composite) > 0.0
