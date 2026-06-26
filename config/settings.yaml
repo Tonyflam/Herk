@@ -261,6 +261,16 @@ profiles:
       daily_loss_limit_pct: 20.0
       per_trade_risk_pct: 5.0
       take_profit_atr_mult: 8.0
+      # Gas-aware dust floor, relaxed for the endgame. The floor is
+      # gas_usd_per_swap / gas_max_pct_of_notional = 0.30/0.015 = $20 by default.
+      # But the volatility tilt selects high-ATR names (XPL), and a high-ATR name
+      # gets a WIDE risk-stop, so its risk-sized entry under the conservative build
+      # posture lands ~$12 — below a $20 floor, leaving the agent unable to ever
+      # BUY the very mover it now ranks #1. Raising the cap to 3% drops the floor
+      # to 0.30/0.03 = $10 so those entries clear (a one-time ~2.5-3% gas cost on a
+      # position we intend to HOLD for the run, not churn). Still rejects truly
+      # uneconomic sub-$10 micro-trades.
+      gas_max_pct_of_notional: 0.03
       # Self-diversification: let the agent trim an over-concentrated holding's
       # EXCESS (above an equal-weight target) to seed a higher-ranked leader it
       # holds none of, when it has no spare cash. This is what frees it from a
