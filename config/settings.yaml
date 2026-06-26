@@ -263,18 +263,19 @@ profiles:
       take_profit_atr_mult: 8.0
       # Gas-aware dust floor, relaxed for the endgame. The floor is
       # gas_usd_per_swap / gas_max_pct_of_notional = 0.30/0.015 = $20 by default.
-      # But the volatility tilt selects high-ATR names (XPL), and a high-ATR name
-      # gets a WIDE risk-stop, so its risk-sized entry under the conservative build
-      # posture lands ~$12 — below a $20 floor, leaving the agent unable to ever
-      # BUY the very mover it now ranks #1. Raising the cap to 3% drops the floor
-      # to 0.30/0.03 = $10 so those entries clear (a one-time ~2.5-3% gas cost on a
-      # position we intend to HOLD for the run, not churn). Still rejects truly
-      # uneconomic sub-$10 micro-trades.
+      # The volatility tilt selects high-ATR names, and a high-ATR name gets a
+      # WIDE risk-stop, so its risk-sized entry under the conservative build
+      # posture can land ~$12 — below a $20 floor, leaving the agent unable to
+      # BUY the very mover it ranks at the top. Raising the cap to 3% drops the
+      # floor to 0.30/0.03 = $10 so those entries clear (a one-time ~2.5-3% gas
+      # cost on a position we intend to HOLD for the run, not churn). Still
+      # rejects truly uneconomic sub-$10 micro-trades. (Gas-token adoption is
+      # prevented in agent._reconcile_onchain, never by this floor.)
       gas_max_pct_of_notional: 0.03
       # Self-diversification: let the agent trim an over-concentrated holding's
       # EXCESS (above an equal-weight target) to seed a higher-ranked leader it
       # holds none of, when it has no spare cash. This is what frees it from a
-      # 100%-one-name corner on its own -- e.g. trimming AAVE to establish XPL --
+      # 100%-one-name corner on its own -- e.g. trimming AAVE to establish INJ --
       # without any operator nudge. Only the surplus is ever sold (the harvester
       # keeps its core); every rotation guardrail still applies.
       rotation_rebalance_enabled: true
@@ -297,29 +298,31 @@ profiles:
     signals:
       min_composite_score: 0.06
       top_n: 2                            # endgame: hold the TOP-2 relative-strength leaders
-                                          # (AAVE + the strongest liquid high-beta mover, XPL),
-                                          # diversifying the catch-up bet while the harvester
-                                          # banks gains. The competitors ahead are frozen in
-                                          # cash, so return from a 2nd strong name climbs the
+                                          # (AAVE + the strongest liquid high-beta ROUTABLE mover,
+                                          # e.g. INJ), diversifying the catch-up bet while the
+                                          # harvester banks gains. The competitors ahead are frozen
+                                          # in cash, so return from a 2nd strong name climbs the
                                           # ladder directly without single-name blow-up risk.
       vol_tilt_weight: 0.7                # grid-fuel tilt: our harvester IS a grid (earns from
                                           # price RANGE), yet vol-adjusted momentum penalises the
                                           # very volatility that fuels it. Add z(atr%)×0.7 to the
-                                          # composite so the most volatile liquid name (XPL, a
-                                          # +3σ range outlier) ranks at/above calm AAVE — a
-                                          # volatility-FIRST selection (the proven edge of the
-                                          # leader's grid). The rebalance then seeds a diversified
-                                          # ~50/50 AAVE+XPL book (capped at equity/top_n, never
-                                          # all-in) where both the harvester and the directional
-                                          # upside live. Live sweep 2026-06-26: 0.7 is the flip
-                                          # threshold — XPL 3.40 > AAVE 3.24 (+0.17), top-2 = XPL+AAVE.
+                                          # composite so the most volatile ROUTABLE liquid name
+                                          # (INJ, atr ~2.5% vs AAVE ~2.4%) ranks alongside AAVE —
+                                          # a volatility-FIRST selection (the proven edge of the
+                                          # leader's grid) but constrained to names with a real
+                                          # PancakeSwap route. The rebalance then seeds a
+                                          # diversified ~50/50 AAVE+INJ book (capped at
+                                          # equity/top_n, never all-in) where both the harvester
+                                          # and the directional upside live.
     universe:
-      # Endgame: widen the agent's eyes beyond the curated majors to include the
-      # single strongest liquid high-beta mover in the eligible set. XPL verified
-      # 2026-06-26: +23% 72h / +11.6% 24h, $131M 24h vol, ~10bps slippage (cheaper
-      # to trade than AAVE). The harvester banks AAVE rips into USDT, which the
-      # entry engine then deploys into XPL -> a self-funding AAVE+XPL momentum book.
-      extra_tradeable: ["XPL"]
+      # XPL (Plasma) was evaluated as the high-beta mover but is a native-L1 gas
+      # token: its only BSC representation (0x405F..26b0) is honeypot-flagged
+      # (honeypot.is riskLevel 100, "high_fail_rate" — holders cannot sell), so
+      # it is UNROUTABLE for us and was removed. The vol tilt now favours the
+      # most volatile name with a VERIFIED PancakeSwap route (INJ) from inside
+      # the curated majors, so no universe widening is needed. The routability
+      # filter in agent.step() also drops any non-routable name defensively.
+      extra_tradeable: []
     regime:
       risk_off_gross_scale: 0.99          # stay fully deployed through fear in the endgame (was 0.80)
       overlay_dd_gate_floor: 0.10         # apply little of the risk-off cut while DD budget is healthy

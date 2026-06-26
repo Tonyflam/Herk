@@ -33,7 +33,7 @@ from .risk.sentinel import Sentinel
 from .risk.sizing import plan_position
 from .signals.engine import SignalEngine, SignalSnapshot
 from .signals.regime import RegimeAssessment
-from .universe import tradeable_universe
+from .universe import eligible_set, is_stable, tradeable_universe
 
 RUNTIME_DIR = REPO_ROOT / "data" / "runtime"
 
@@ -211,6 +211,14 @@ class Agent:
             extra=tuple(s.universe.extra_tradeable),
             exclude=tuple(s.universe.exclude),
         ))
+        # Only rank names the executor can actually route on-chain (a verified
+        # BSC contract address resolves). Without this the engine can top-rank a
+        # name with no swap route (a CEX-only / native-L1 mover, or a honeypot
+        # we never wired), the entry loop wastes its slot on an unfillable order,
+        # and idle cash never deploys. token_meta checks the settings override
+        # then the builtin registry; None => not routable.
+        from .data.onchain import token_meta
+        universe = [u for u in universe if token_meta(s, u) is not None]
         snap = self.engine.compute(universe)
 
         prices = {sig.symbol: sig.price for sig in snap.signals if sig.price > 0}
@@ -1020,8 +1028,17 @@ class Agent:
                                          "detail": "no wallet address resolved"})
             return
 
-        held = list(self.portfolio.positions)
         base = s.capital.base_currency
+        elig = eligible_set()
+        # Gas/native tokens (BNB/WBNB) and non-scored or stable symbols must
+        # never be booked as tradeable positions: they do not count toward
+        # scoring and selling the gas leg would strand the agent. Drop any a
+        # prior reconcile may have adopted (e.g. BNB once the dust floor fell
+        # below the held gas value).
+        for psym in list(self.portfolio.positions):
+            if psym not in elig or is_stable(psym):
+                del self.portfolio.positions[psym]
+        held = list(self.portfolio.positions)
         # Query held + base + the operator's swing symbol + the ranked universe
         # (``prices`` keys), so we can also DETECT holdings the book has lost track
         # of (a redeploy that dropped a position from saved state), not just the
@@ -1076,6 +1093,10 @@ class Agent:
         if s.scoring.mark_from_onchain:
             for asym, ah in list(holdings.items()):
                 if asym == base or asym in self.portfolio.positions:
+                    continue
+                if asym not in elig or is_stable(asym):
+                    # Never adopt the gas leg (BNB/WBNB) or a non-scored/stable
+                    # holding as a momentum position.
                     continue
                 if not ah or not ah.ok or ah.units <= 1e-12:
                     continue
