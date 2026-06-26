@@ -698,6 +698,7 @@ class Agent:
         ranked = snap.top(s.signals.top_n)
         if not ranked:
             return
+        orig_top_syms = {x.symbol for x in ranked}   # full top-N before swing-block filtering
         swing_block = self._swing_block_symbol()
         if swing_block:
             # Don't let rotation steer freed capital into a name the operator is
@@ -747,34 +748,76 @@ class Agent:
             if edge < rc.rotation_min_edge:
                 continue
             cands.append((edge, held_val, sym, pos))
-        if not cands:
+
+        # Decide the funding source + slice for this cycle (one trade only).
+        # Path A (dead weight): fully recycle the single worst *unranked* stale
+        # chunk the leader dominates. Path B (rebalance-toward-strength): when
+        # there is neither dead weight nor cash, seed the under-held leader by
+        # trimming the EXCESS (above an equal-weight target) of the most
+        # over-weight name the engine STILL ranks -- the harvest core included,
+        # but only its surplus, never the core itself. This is how the agent
+        # diversifies off a single over-concentrated name on its own.
+        sell_sym: str | None = None
+        sell_pos: Position | None = None
+        sell_qty = 0.0
+        label = ""
+        if cands:
+            cands.sort(key=lambda t: (t[0], t[1]), reverse=True)
+            _edge, _held_val, sell_sym, sell_pos = cands[0]
+            sell_qty = sell_pos.qty                         # recycle the whole stale chunk
+            label = f"rotate->{leader.symbol}"
+        elif getattr(rc, "rotation_rebalance_enabled", False) and constrained:
+            target_each = equity / max(1, s.signals.top_n)
+            leader_held = self.portfolio.positions.get(leader.symbol)
+            leader_val = (leader_held.qty * prices.get(leader.symbol, leader_held.avg_entry)
+                          if leader_held else 0.0)
+            shortfall = max(0.0, target_each - leader_val)
+            best_excess = 0.0
+            for sym, pos in self.portfolio.positions.items():
+                if sym == leader.symbol or sym not in orig_top_syms:
+                    continue
+                held_val = pos.qty * prices.get(sym, pos.avg_entry)
+                excess = held_val - target_each
+                if excess < rc.rotation_min_stale_usd:
+                    continue
+                if self._position_age_hours(pos, now) < rc.rotation_min_hold_hours:
+                    continue
+                # Tilt only toward an equal-or-stronger leader (never trim a
+                # stronger name to fund a weaker one).
+                if leader.composite - comp.get(sym, -999.0) < rc.rotation_rebalance_min_edge:
+                    continue
+                if excess > best_excess:
+                    best_excess, sell_sym, sell_pos = excess, sym, pos
+            if sell_sym is not None and sell_pos is not None:
+                pref = prices.get(sell_sym, sell_pos.avg_entry)
+                trim_usd = min(best_excess, max(shortfall, rc.rotation_min_stale_usd))
+                sell_qty = min(sell_pos.qty, (trim_usd / pref) if pref > 0 else 0.0)
+                label = f"rebalance->{leader.symbol}"
+        if sell_sym is None or sell_pos is None or sell_qty <= 0:
             return
 
-        # Rotate the single strongest disagreement (largest edge) this cycle.
-        cands.sort(key=lambda t: (t[0], t[1]), reverse=True)
-        edge, held_val, sym, pos = cands[0]
-        ref = prices.get(sym, pos.avg_entry)
-        dec = self.sentinel.pre_exit(symbol=sym, qty=pos.qty, held_qty=pos.qty)
+        ref = prices.get(sell_sym, sell_pos.avg_entry)
+        dec = self.sentinel.pre_exit(symbol=sell_sym, qty=sell_qty, held_qty=sell_pos.qty)
         if not dec.approved:
             return
         if dry_run:
-            actions.append(Action("dry_run", sym,
-                f"would rotate -> {leader.symbol} (edge {edge:.2f}, ${held_val:.2f})"))
+            actions.append(Action("dry_run", sell_sym,
+                f"would {label} (${sell_qty * ref:.2f})"))
             return
-        order = Order(sym, "sell", ref_price=ref, qty=pos.qty,
+        order = Order(sell_sym, "sell", ref_price=ref, qty=sell_qty,
                       liquidity_usd=1e9, reason="rotation")
         fill = self.executor.execute(order)
         if not fill.ok or fill.qty <= 0:
             self.ledger.append("alert", {"reason": "rotation_unfilled",
-                                          "symbol": sym, "note": fill.note[:80]})
-            actions.append(Action("blocked", sym, f"rotation unfilled: {fill.note[:60]}"))
+                                          "symbol": sell_sym, "note": fill.note[:80]})
+            actions.append(Action("blocked", sell_sym, f"rotation unfilled: {fill.note[:60]}"))
             return
         realized = self.portfolio.apply_sell(fill)
         self.ledger.append("trade", {**asdict(fill), "reason": "rotation",
                                       "realized_pnl": round(realized, 4),
                                       "into": leader.symbol})
-        actions.append(Action("exit", sym,
-            f"rotate->{leader.symbol} @ {fill.price:.4f} pnl {realized:+.2f}"))
+        actions.append(Action("exit", sell_sym,
+            f"{label} @ {fill.price:.4f} pnl {realized:+.2f}"))
 
     # -------------------------------------------------------------- entries
     def _run_entries(self, snap: SignalSnapshot, prices, posture, actions, dry_run, now) -> None:

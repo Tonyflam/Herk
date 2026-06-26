@@ -102,6 +102,17 @@ class RiskCfg:
     rotation_big_holding_frac: float = 0.45  # OR the stale name is >= this fraction of equity
     rotation_min_stale_usd: float = 10.0     # never rotate a holding smaller than this (gas-inefficient)
     rotation_topup_frac: float = 0.85        # leader is "underfunded" if held < this x its max target
+    # Rebalance-toward-strength: when there is no dead weight to recycle and no
+    # cash, the agent may seed a higher-ranked leader it holds none (or too
+    # little) of by trimming the EXCESS of an over-weight name the engine STILL
+    # ranks (above an equal-weight target) -- the self-diversification primitive
+    # that lets it move off a single over-concentrated name on its own. Only the
+    # excess is ever sold (the core/harvester slice is kept), it tilts only
+    # toward an equal-or-stronger leader, and all the rotation hysteresis (min
+    # hold, min size, one trade/cycle, Sentinel) still applies. OFF by default
+    # (balanced/backtests unchanged); ON in the contest 'max' profile.
+    rotation_rebalance_enabled: bool = False
+    rotation_rebalance_min_edge: float = 0.0  # only trim toward a leader at least this much stronger
     # --- Manual swing control (operator-directed take-profit + dip rebuy) ---
     # OFF by default. When enabled, the operator can fire a one-shot SELL of
     # ``swing_symbol`` to cash via the HELM_SWING_CMD env var (verb#token, e.g.

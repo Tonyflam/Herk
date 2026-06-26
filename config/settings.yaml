@@ -261,6 +261,13 @@ profiles:
       daily_loss_limit_pct: 20.0
       per_trade_risk_pct: 5.0
       take_profit_atr_mult: 8.0
+      # Self-diversification: let the agent trim an over-concentrated holding's
+      # EXCESS (above an equal-weight target) to seed a higher-ranked leader it
+      # holds none of, when it has no spare cash. This is what frees it from a
+      # 100%-one-name corner on its own -- e.g. trimming AAVE to establish XPL --
+      # without any operator nudge. Only the surplus is ever sold (the harvester
+      # keeps its core); every rotation guardrail still applies.
+      rotation_rebalance_enabled: true
       # Manual swing lever, live-armed: lets the operator take profit on the
       # leader on command and auto-rebuy the dip. Idle until HELM_SWING_CMD is
       # set; all guardrails stay in force.

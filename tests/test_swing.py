@@ -739,20 +739,24 @@ def test_harvest_frac_env_override_resizes_slice(tmp_path, monkeypatch):
 # ============================================================================
 # Harvester <-> rotation/entry coordination (endgame top_n=2 diversification).
 #
-# Live the harvester owns the swing symbol's whole inventory (it is the sole
-# controller of that core). Two invariants keep the rest of the engine from
-# fighting it while still letting the banked USDT diversify into the 2nd
-# strongest momentum name (the endgame AAVE+XPL book):
-#   1. rotation must NEVER sell the harvest-owned core, even when it looks like
-#      a large, stale, leader-dominated chunk -- only the harvester trims it;
-#   2. the cash the harvester banks must deploy into the 2nd-ranked name via the
-#      normal entry loop (the core stays blocked from re-entry).
+# Live the harvester owns the swing symbol's core inventory. These invariants
+# keep the rest of the engine coherent with it while still letting the agent
+# diversify itself into the 2nd strongest momentum name (the AAVE+XPL book):
+#   1. with rebalance OFF (default), rotation never sells the harvest-owned core
+#      as "dead weight" -- only the harvester trims it;
+#   2. with rebalance ON (contest 'max'), rotation may trim only the core's
+#      EXCESS above an equal-weight target to seed a higher-ranked leader the
+#      agent holds none of -- the autonomy primitive that breaks a 100%-one-name
+#      corner without operator help; the core itself is never cut below target;
+#   3. cash (banked by the harvester or freed by a rebalance) deploys into the
+#      under-held ranked name via the normal entry loop, not back into the core.
 # ============================================================================
 def test_rotation_never_sells_harvest_owned_core(tmp_path, monkeypatch):
-    """The harvest-owned core is protected from rotation: even as a big, old,
-    cash-constrained holding that the leader dominates by a wide composite edge,
-    rotation leaves it untouched (only the harvester may trim that inventory)."""
-    agent = _hagent(tmp_path, monkeypatch)
+    """With rebalance OFF (the default), the harvest-owned core is fully
+    protected from rotation: even as a big, old, cash-constrained holding the
+    leader dominates by a wide edge, rotation leaves it untouched (only the
+    harvester may trim that inventory)."""
+    agent = _hagent(tmp_path, monkeypatch)      # balanced -> rotation_rebalance_enabled False
     try:
         # ~100% in AAVE with dust cash: big + capital-constrained + old, and the
         # unheld leader XPL beats AAVE by a huge composite edge -> absent the
@@ -766,6 +770,52 @@ def test_rotation_never_sells_harvest_owned_core(tmp_path, monkeypatch):
         assert "AAVE" in agent.portfolio.positions                  # core untouched
         assert abs(agent.portfolio.positions["AAVE"].qty - 1.0) < 1e-9
         assert not any(a.kind == "exit" for a in actions)           # no rotation fired
+    finally:
+        agent.close()
+
+
+def test_rotation_rebalances_excess_to_seed_leader(tmp_path, monkeypatch):
+    """With rebalance ON, an over-concentrated agent seeds a higher-ranked leader
+    it holds none of -- by itself. From 100%% AAVE with no cash and XPL ranked #1,
+    rotation trims only AAVE's EXCESS above the equal-weight target (~half) into
+    cash; the freed USDT then funds XPL via the entry loop. The AAVE core is
+    preserved (never cut below target). This is the autonomy that ends the
+    'dull, can't act on its own signal' corner -- no operator nudge required."""
+    agent = _hagent(tmp_path, monkeypatch, rotation_rebalance_enabled=True)
+    agent.settings.signals = replace(agent.settings.signals, top_n=2)
+    try:
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0, age_h=24)])
+        prices = {"AAVE": 86.0, "XPL": 1.20}
+        # XPL ranks #1 (unheld leader); AAVE #2 (over-weight, the funding source).
+        snap = _snap(ranked=[_sig("XPL", 2.0, 1.20), _sig("AAVE", 1.8, 86.0)])
+        actions: list = []
+        agent._run_rotation(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+
+        target_each = (86.0 + 0.30) / 2                   # equal-weight target per name
+        aave = agent.portfolio.positions.get("AAVE")
+        assert aave is not None and aave.qty < 1.0        # only the excess trimmed
+        assert aave.qty * 86.0 >= target_each - 2.0       # core preserved at ~target
+        assert agent.portfolio.cash >= target_each - 5.0  # ~half freed to seed XPL
+        assert any(a.kind == "exit" and "rebalance->XPL" in a.detail for a in actions)
+    finally:
+        agent.close()
+
+
+def test_rotation_rebalance_keeps_stronger_name_when_leader_weaker(tmp_path, monkeypatch):
+    """Rebalance tilts only toward strength: if the unheld leader is WEAKER than
+    the over-weight core, the agent does not trim the stronger name to fund it."""
+    agent = _hagent(tmp_path, monkeypatch, rotation_rebalance_enabled=True)
+    agent.settings.signals = replace(agent.settings.signals, top_n=2)
+    try:
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0, age_h=24)])
+        prices = {"AAVE": 86.0, "XPL": 1.20}
+        # XPL is ranked but WEAKER than the AAVE we hold -> no rebalance.
+        snap = _snap(ranked=[_sig("AAVE", 2.4, 86.0), _sig("XPL", 1.1, 1.20)])
+        actions: list = []
+        agent._run_rotation(snap, prices, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 1.0) < 1e-9   # untouched
+        assert not any(a.kind == "exit" for a in actions)
     finally:
         agent.close()
 
