@@ -30,3 +30,8 @@ node_modules/
 .vscode/
 .DS_Store
 *.swp
+
+# --- one-off research / scan scripts (not part of the agent runtime) --------
+scan_market.py
+scan_onchain.py
+verify_cands.py

@@ -665,6 +665,87 @@ def test_harvest_anchor_persists_across_restart(tmp_path, monkeypatch):
         restored.close()
 
 
+def test_harvest_trail_locks_profit_on_a_giveback(tmp_path, monkeypatch):
+    """With the trailing lock armed, a give-back from a fresh peak while the core
+    is in profit banks a slice to cash AHEAD of a deeper dip -- without waiting
+    for the full down-step. This is the "cash the top before it rolls over" leg."""
+    agent = _hagent(tmp_path, monkeypatch, harvest_trail_giveback_pct=0.03)
+    try:
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 95.0
+        agent.portfolio.harvest_peak_px = 95.0
+        actions: list = []
+        # 92.0 is -3.2% off the 95 peak (trail fires) yet still inside the 3.5%
+        # band off the anchor (no ordinary dip-buy), and well above the entry.
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 92.0)])
+        agent._run_harvest(snap, {"AAVE": 92.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 0.80) < 0.02   # ~20% banked
+        assert agent.portfolio.cash > 15.0                               # USDT in hand
+        locks = [a for a in actions if a.kind == "exit" and "trail-lock" in a.detail]
+        assert locks and "pnl +" in locks[0].detail                      # realized gain
+        assert agent.portfolio.harvest_peak_px == 92.0                   # re-armed at px
+    finally:
+        agent.close()
+
+
+def test_harvest_trail_off_by_default_is_a_no_op(tmp_path, monkeypatch):
+    """With the give-back at 0.0 (the default) the trail leg never fires: a small
+    pullback inside the band does nothing -- existing behaviour is preserved."""
+    agent = _hagent(tmp_path, monkeypatch)   # harvest_trail_giveback_pct defaults to 0.0
+    try:
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=86.0)])
+        agent.portfolio.harvest_anchor_px = 95.0
+        agent.portfolio.harvest_peak_px = 95.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 92.0)])
+        agent._run_harvest(snap, {"AAVE": 92.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 1.0) < 1e-9    # untouched
+        assert actions == []
+    finally:
+        agent.close()
+
+
+def test_harvest_trail_holds_when_underwater(tmp_path, monkeypatch):
+    """The trail leg never realizes a loss: a give-back from the peak while price
+    is below the average entry does nothing (catastrophe cover is the stop's job,
+    not the profit-lock's)."""
+    agent = _hagent(tmp_path, monkeypatch, harvest_trail_giveback_pct=0.03)
+    try:
+        # Entry 93 > current 92 -> underwater; the trail must stand down.
+        _book(agent, cash=0.30, positions=[_pos("AAVE", qty=1.0, price=93.0)])
+        agent.portfolio.harvest_anchor_px = 95.0
+        agent.portfolio.harvest_peak_px = 95.0
+        actions: list = []
+        snap = _snap(ranked=[_sig("AAVE", 2.0, 92.0)])
+        agent._run_harvest(snap, {"AAVE": 92.0}, _posture(), actions, dry_run=False, now=_NOW)
+
+        assert abs(agent.portfolio.positions["AAVE"].qty - 1.0) < 1e-9    # not sold
+        assert not any(a.kind == "exit" for a in actions)
+    finally:
+        agent.close()
+
+
+def test_harvest_trail_peak_persists_across_restart(tmp_path, monkeypatch):
+    """The running peak survives a reload so the trailing lock is continuous
+    across the agent's frequent restarts."""
+    monkeypatch.delenv("HELM_SWING_CMD", raising=False)
+    agent = _hagent(tmp_path, monkeypatch, harvest_trail_giveback_pct=0.03)
+    try:
+        _book(agent, cash=10.0, positions=[_pos("AAVE", qty=0.5, price=86.0)])
+        agent.portfolio.harvest_peak_px = 98.42
+        agent._save_state()
+    finally:
+        agent.close()
+
+    restored = _hagent(tmp_path, monkeypatch, harvest_trail_giveback_pct=0.03)
+    try:
+        assert restored.portfolio.harvest_peak_px == 98.42
+    finally:
+        restored.close()
+
+
 def test_harvest_owns_swing_symbol_in_block_helper(tmp_path, monkeypatch):
     """When harvesting, the symbol is blocked from the normal entry/rotation
     engine unconditionally -- the grid owns its whole inventory."""

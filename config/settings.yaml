@@ -295,6 +295,7 @@ profiles:
       harvest_step_pct: 0.035
       harvest_trade_frac: 0.20
       harvest_min_trade_usd: 4.0
+      harvest_trail_giveback_pct: 0.03   # scale a slice out on a 3% give-back from a fresh peak
     signals:
       min_composite_score: 0.06
       top_n: 2                            # endgame: hold the TOP-2 relative-strength leaders

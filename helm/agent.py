@@ -109,6 +109,7 @@ class Agent:
             p.swing_sell_px = float(d.get("swing_sell_px", 0.0))
             p.swing_token = str(d.get("swing_token", ""))
             p.harvest_anchor_px = float(d.get("harvest_anchor_px", 0.0))
+            p.harvest_peak_px = float(d.get("harvest_peak_px", 0.0))
             return p
         except Exception:
             return None
@@ -130,6 +131,7 @@ class Agent:
             "swing_sell_px": p.swing_sell_px,
             "swing_token": p.swing_token,
             "harvest_anchor_px": p.harvest_anchor_px,
+            "harvest_peak_px": p.harvest_peak_px,
         }
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, indent=2, default=str))
@@ -593,16 +595,34 @@ class Agent:
             return
 
         step = self._harvest_param("HELM_HARVEST_STEP", rc.harvest_step_pct, 0.005, 0.5)
+        giveback = self._harvest_param(
+            "HELM_HARVEST_GIVEBACK", getattr(rc, "harvest_trail_giveback_pct", 0.0), 0.0, 0.5)
         anchor = p.harvest_anchor_px
+        if px > p.harvest_peak_px:                          # track the running peak
+            p.harvest_peak_px = px
         # First sight (or a lost anchor after state churn): arm the grid at the
         # current price without forcing a trade — preserves upside.
         if anchor <= 0:
             p.harvest_anchor_px = px
+            p.harvest_peak_px = px
             return
         if px >= anchor * (1.0 + step):
             p.harvest_anchor_px = px                       # rip: bank a slice
+            p.harvest_peak_px = px                          # reset the trail to the new high
             self._harvest_bank(sym, px, actions, dry_run)
-        elif px <= anchor * (1.0 - step):
+            return
+        # Trailing profit-lock: a give-back from a fresh peak while the core is in
+        # profit banks a slice to cash AHEAD of a deeper dip (scale out the top).
+        if giveback > 0.0:
+            pos = p.positions.get(sym)
+            if (pos is not None and pos.qty > 0 and p.harvest_peak_px > 0.0
+                    and px <= p.harvest_peak_px * (1.0 - giveback)
+                    and px > pos.avg_entry):
+                p.harvest_anchor_px = px                   # re-reference the band here
+                p.harvest_peak_px = px                     # re-arm: needs a new peak to fire again
+                self._harvest_bank(sym, px, actions, dry_run, reason="harvest_trail")
+                return
+        if px <= anchor * (1.0 - step):
             p.harvest_anchor_px = px                       # dip: buy a slice
             self._harvest_dip(sym, px, posture, snap, prices, actions, dry_run, now)
 
@@ -611,7 +631,7 @@ class Agent:
         return max(self.settings.contest.dust_floor_usd,
                    float(getattr(self.settings.risk, "harvest_min_trade_usd", 4.0)))
 
-    def _harvest_bank(self, sym, px, actions, dry_run) -> None:
+    def _harvest_bank(self, sym, px, actions, dry_run, reason="harvest_sell") -> None:
         """Bank a fixed slice of the position into USDT on a rip (locks profit)."""
         rc = self.settings.risk
         p = self.portfolio
@@ -622,20 +642,21 @@ class Agent:
         units = pos.qty * frac
         if units * px < self._harvest_min_trade():
             return
+        label = "trail-lock" if reason == "harvest_trail" else "harvest-bank"
         if dry_run:
-            actions.append(Action("dry_run", sym, f"would harvest-bank {units:.6f} @ {px:.4f}"))
+            actions.append(Action("dry_run", sym, f"would {label} {units:.6f} @ {px:.4f}"))
             return
-        order = Order(sym, "sell", ref_price=px, qty=units, liquidity_usd=1e9, reason="harvest_sell")
+        order = Order(sym, "sell", ref_price=px, qty=units, liquidity_usd=1e9, reason=reason)
         fill = self.executor.execute(order)
         if not fill.ok or fill.qty <= 0:
-            self.ledger.append("alert", {"reason": "harvest_sell_unfilled",
+            self.ledger.append("alert", {"reason": reason + "_unfilled",
                                           "symbol": sym, "note": fill.note[:80]})
             return
         realized = p.apply_sell(fill)
-        self.ledger.append("trade", {**asdict(fill), "reason": "harvest_sell",
+        self.ledger.append("trade", {**asdict(fill), "reason": reason,
                                       "realized_pnl": round(realized, 4)})
         actions.append(Action("exit", sym,
-            f"harvest-bank ${fill.notional_usd:.2f} @ {fill.price:.4f} pnl {realized:+.2f}"))
+            f"{label} ${fill.notional_usd:.2f} @ {fill.price:.4f} pnl {realized:+.2f}"))
 
     def _harvest_dip(self, sym, px, posture, snap, prices, actions, dry_run, now) -> None:
         """Deploy a fixed slice of idle cash into the symbol on a dip."""

@@ -59,6 +59,7 @@ class Portfolio:
     swing_token: str = ""            # last consumed HELM_SWING_CMD token (one-shot idempotency)
     # Volatility harvester (autonomous grid on the swing symbol); persisted.
     harvest_anchor_px: float = 0.0   # moving reference price for the next harvest band cross
+    harvest_peak_px: float = 0.0     # running peak since last harvest action (trailing profit-lock)
 
     @classmethod
     def new(cls, initial_equity: float) -> "Portfolio":

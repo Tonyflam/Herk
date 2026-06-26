@@ -141,6 +141,11 @@ class RiskCfg:
     harvest_trade_frac: float = 0.20          # slice per cross: frac of position to bank on a rip,
                                               # or frac of idle cash to deploy on a dip
     harvest_min_trade_usd: float = 4.0        # skip harvest trades smaller than this (gas efficiency)
+    # Trailing profit-lock: once price gives back this fraction from a fresh local
+    # peak while the core is in profit, bank a ``harvest_trade_frac`` slice to cash
+    # AHEAD of a deeper dip (scale out as a move rolls over). 0.0 = OFF (pure band
+    # grid -- existing behaviour). Live-tunable via HELM_HARVEST_GIVEBACK.
+    harvest_trail_giveback_pct: float = 0.0
 
 
 @dataclass
