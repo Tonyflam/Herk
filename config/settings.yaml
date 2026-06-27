@@ -138,7 +138,10 @@ data:
 universe:
   use_curated_tradeable: true            # trade liquid majors subset, not all 149
   extra_tradeable: []                    # add eligible symbols to widen the book
-  exclude: [ETC, PENDLE, COMP, SUSHI, APE, SNX, FET, LDO]   # no verified deep-liquidity USDT route on BSC -> keep engine from ranking an unbuyable #1
+  # FET + APE removed from exclude 2026-06-27: both now have on-chain verified,
+  # DexScreener-sellable PancakeSwap routes (addresses in execution.token_addresses).
+  # Remaining names stay excluded (no verified route -> would be unbuyable #1).
+  exclude: [ETC, PENDLE, COMP, SUSHI, SNX, LDO]
 
 execution:
   adapter: paper                         # paper | twak
@@ -169,6 +172,17 @@ execution:
     FIL:  "0x0D8Ce2A99Bb6e3B7Db580eD848240e4a0F9aE153"
     INJ:  "0xa2B726B1145A4773F68593CF171187d8EBe4d495"
     TWT:  "0x4B0F1812e5Df2A09796481Ff14017e6005508003"
+    # --- Endgame universe expansion (added 2026-06-27, final 2 days). Every
+    # address below was (1) on-chain verified: erc20 symbol() + decimals() match
+    # the expected token, AND (2) confirmed genuinely SELLABLE via DexScreener
+    # aggregated V2+V3 swap data showing real two-way buy/sell flow. This second
+    # check corrects honeypot.is false positives, which (verified) also wrongly
+    # flag AAVE and INJ as honeypots even though we trade both live. These widen
+    # the agent's high-momentum options for the catch-up sprint.
+    XPL:   "0x405FBc9004D857903bFD6b3357792D71a50726b0"  # Plasma; +21% 72h; 23.8k sells/24h, $0.45M DEX liq (PCS V3)
+    FET:   "0x031b41e504677879370e9DBcF937283A8691Fa7f"  # Fetch/ASI; +12% 24h; verified two-way (326 sells/24h)
+    PENGU: "0x6418c0dd099a9FDA397C766304CDd918233E8847"  # Pudgy Penguins; +10% 24h; verified two-way
+    APE:   "0x8f86a15EC17cb3369d8b3E666dAdBC11daA82b79"  # ApeCoin; verified two-way (539 sells/24h)
 
 scoring:
   # Competition scoring assumptions HELM encodes. CONFIRM against the official
@@ -328,13 +342,16 @@ profiles:
                                           # equity/top_n, never all-in) where both the harvester
                                           # and the directional upside live.
     universe:
-      # XPL (Plasma) was evaluated as the high-beta mover but is a native-L1 gas
-      # token: its only BSC representation (0x405F..26b0) is honeypot-flagged
-      # (honeypot.is riskLevel 100, "high_fail_rate" — holders cannot sell), so
-      # it is UNROUTABLE for us and was removed. The vol tilt now favours the
-      # most volatile name with a VERIFIED PancakeSwap route (INJ) from inside
-      # the curated majors, so no universe widening is needed. The routability
-      # filter in agent.step() also drops any non-routable name defensively.
+      # Endgame (2026-06-27): scan the FULL eligible universe, not just the
+      # curated majors, so the agent can rotate into ANY eligible token that is
+      # both (a) routable — has a verified address in execution.token_addresses —
+      # and (b) the strongest momentum name. The routability + liquidity + quality
+      # filters in agent.step()/engine keep it from touching junk or unsellable
+      # names. NOTE: the earlier "XPL is a honeypot" call was a honeypot.is FALSE
+      # POSITIVE — the same tool flags AAVE/INJ (which we trade live) as honeypots.
+      # XPL was re-verified SELLABLE on DexScreener (23.8k real sells/24h, $0.45M
+      # V3 liquidity) and is now in the registry above.
+      use_curated_tradeable: false
       extra_tradeable: []
     regime:
       risk_off_gross_scale: 0.99          # stay fully deployed through fear in the endgame (was 0.80)
