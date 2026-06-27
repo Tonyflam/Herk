@@ -324,12 +324,21 @@ profiles:
     signals:
       min_composite_score: 0.06
       autopilot_fast_hours: 3            # fast-momentum window (1h closes) the autopilot reads
-      top_n: 2                            # endgame: hold the TOP-2 relative-strength leaders
-                                          # (AAVE + the strongest liquid high-beta ROUTABLE mover,
-                                          # e.g. INJ), diversifying the catch-up bet while the
-                                          # harvester banks gains. The competitors ahead are frozen
-                                          # in cash, so return from a 2nd strong name climbs the
-                                          # ladder directly without single-name blow-up risk.
+      top_n: 1                            # FINAL-SPRINT MAX CONCENTRATION (2026-06-27): the #1
+                                          # competitor is no longer frozen in cash — it is a LIVE
+                                          # mover (~100% in a pumping token, +10% and climbing). A
+                                          # diversified 2-name book cannot out-run a single climbing
+                                          # leader; only a max-conviction bet on the strongest
+                                          # relative-strength name can. This profile's own
+                                          # walk-forward backtest is unambiguous: top_n=1 TRIPLES the
+                                          # tournament-winning (>=15%) rate (2%->7%) and lifts the
+                                          # ceiling +24%->+32% vs top_n=2. We concentrate the whole
+                                          # book into the engine's #1 ranked mover for the last ~30h.
+                                          # DQ guardrails stay intact: max_position_pct 0.80 keeps a
+                                          # 20% cash buffer, the convex survival taper collapses gross
+                                          # before the 30% gate, and Sentinel pre-trade checks every
+                                          # entry. The harvester banks this single name's rips to USDT
+                                          # so realized gains can never round-trip away.
       vol_tilt_weight: 0.7                # grid-fuel tilt: our harvester IS a grid (earns from
                                           # price RANGE), yet vol-adjusted momentum penalises the
                                           # very volatility that fuels it. Add z(atr%)×0.7 to the
