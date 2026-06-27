@@ -25,6 +25,7 @@ plus human-readable reasons the dashboard and ledger can display.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -162,6 +163,28 @@ class MetaController:
         reasons.append(f"BUILD: {ret_pct:+.1f}% → grow the stack (×1.0)")
         return "build", 1.0, 1.0, reasons
 
+    # ------------------------------------------------------- gross budget
+    def _max_gross_base(self) -> float:
+        """Resolved base gross-exposure cap (fraction of equity), env-overridable.
+
+        ``HELM_MAX_GROSS`` lets the operator open or tighten the gross budget live
+        — e.g. lean in to deploy idle cash while the field's leaders sit frozen in
+        cash late, or pull back if the leader rolls over — without a code redeploy.
+        It scales the SAME exposure pipeline: the convex survival taper, the
+        endgame time-taper and the regime overlay still multiply it in ``assess``,
+        and the per-name position cap + the trend-deploy ceiling still bound the
+        actual fill, so it can NEVER push risk through the drawdown halt or the DQ
+        gate. A missing or unparseable value falls back to the profile default.
+        """
+        base = float(self.settings.risk.max_gross_exposure)
+        raw = (os.environ.get("HELM_MAX_GROSS", "") or "").strip()
+        if raw:
+            try:
+                base = max(0.1, min(2.5, float(raw)))
+            except ValueError:
+                pass
+        return base
+
     # ------------------------------------------------------------- assess
     def assess(
         self,
@@ -227,7 +250,7 @@ class MetaController:
             halt_new_risk=halt,
             exposure_scale=exposure_scale,
             aggression_scale=aggression_scale,
-            max_gross_pct=self.settings.risk.max_gross_exposure * exposure_scale,
+            max_gross_pct=self._max_gross_base() * exposure_scale,
             per_trade_risk_pct=self.settings.risk.per_trade_risk_pct * aggression_scale,
             reasons=reasons,
         )

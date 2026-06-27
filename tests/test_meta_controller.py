@@ -28,6 +28,33 @@ def test_build_phase_runs_full_budget(settings):
     assert p.drawdown_budget_left == pytest.approx(1.0, abs=1e-9)
 
 
+def test_max_gross_env_lever_opens_and_survival_still_dominates(settings, monkeypatch):
+    """``HELM_MAX_GROSS`` overrides the profile gross base live (scaling the SAME
+    survival-gated pipeline). It opens deployment when we choose to lean in, is
+    clamped so it can't be fat-fingered into reckless leverage, and can NEVER
+    deploy through the halt line — survival still dominates."""
+    mc = MetaController(settings)
+    # Full-budget point (early, no drawdown, neutral regime) → exposure_scale == 1,
+    # so max_gross_pct reads the resolved base directly.
+    monkeypatch.setenv("HELM_MAX_GROSS", "1.9")
+    p = mc.assess(now=_at(mc, 0.10), equity=100, peak_equity=100, initial_equity=100)
+    assert p.max_gross_pct == pytest.approx(1.9, rel=1e-6)
+    # Survival dominates: past the halt line the lever cannot deploy anything.
+    halt = settings.contest.halt_drawdown_pct
+    eq = 100.0 * (1.0 - (halt + 1.0) / 100.0)
+    p2 = mc.assess(now=_at(mc, 0.5), equity=eq, peak_equity=100, initial_equity=100)
+    assert p2.halt_new_risk is True
+    assert p2.max_gross_pct == 0.0
+    # Clamp: an absurd value is bounded, never uncapped leverage.
+    monkeypatch.setenv("HELM_MAX_GROSS", "99")
+    p3 = mc.assess(now=_at(mc, 0.10), equity=100, peak_equity=100, initial_equity=100)
+    assert p3.max_gross_pct == pytest.approx(2.5, rel=1e-6)
+    # Garbage falls back to the profile default.
+    monkeypatch.setenv("HELM_MAX_GROSS", "not-a-number")
+    p4 = mc.assess(now=_at(mc, 0.10), equity=100, peak_equity=100, initial_equity=100)
+    assert p4.max_gross_pct == pytest.approx(settings.risk.max_gross_exposure, rel=1e-6)
+
+
 def test_halt_when_drawdown_breaches_line(settings):
     mc = MetaController(settings)
     halt = settings.contest.halt_drawdown_pct
