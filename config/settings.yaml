@@ -271,7 +271,18 @@ profiles:
       # USDT (cash cap in _run_entries). The convex SURVIVAL drawdown taper still
       # collapses gross as we approach the halt line, so the 30% DQ gate is intact.
       max_gross_exposure: 1.40
-      max_position_pct: 0.80              # per-name cap keeps a single-name gap-to-DQ cushion
+      # FINAL-DAY full deployment (2026-06-27): raised 0.80 -> 0.90 so the win-or-bust
+      # endgame puts ~90% into the #1 leader instead of idling 20% in cash, while the
+      # remaining ~10% stays live as grid-fuel for the harvester's buy-the-dip leg.
+      # Single-name gap-to-DQ is still ~33% (we sit at ~9% DD) and the convex survival
+      # taper + 30% gate are untouched, so this lifts the ceiling without opening the floor.
+      max_position_pct: 0.90
+      # FINAL-DAY faster leadership tracking: halve the anti-whipsaw min-hold (4.0 -> 2.0h)
+      # so the agent consolidates into the engine's current #1 mover within ~2h of a restart
+      # instead of lagging a third of the contest that remains. rotation_min_edge 0.40 still
+      # demands a decisive composite gap before any rotation, so it follows real leadership
+      # changes without thrashing on noise.
+      rotation_min_hold_hours: 2.0
       daily_loss_limit_pct: 20.0
       per_trade_risk_pct: 5.0
       take_profit_atr_mult: 8.0
@@ -323,6 +334,12 @@ profiles:
       autopilot_entry_mom: 0.015         # buy back when leader fast-mom >= +1.5%
     signals:
       min_composite_score: 0.06
+      # FINAL-DAY recent-momentum tilt: with ~1 day left, week-old trend is stale, so the
+      # multi-horizon blend is reweighted toward what is moving NOW. 24h dominates (0.40),
+      # 6h is nearly doubled (0.15 -> 0.25), and the 7-day horizon is halved (0.20 -> 0.10).
+      # Same lookbacks [6,24,72,168] -- this only shifts the agent's attention to current
+      # leadership so it rides fresh strength instead of fading stale momentum.
+      momentum_weights: [0.25, 0.40, 0.25, 0.10]
       autopilot_fast_hours: 3            # fast-momentum window (1h closes) the autopilot reads
       top_n: 1                            # FINAL-SPRINT MAX CONCENTRATION (2026-06-27): the #1
                                           # competitor is no longer frozen in cash — it is a LIVE
@@ -334,9 +351,10 @@ profiles:
                                           # tournament-winning (>=15%) rate (2%->7%) and lifts the
                                           # ceiling +24%->+32% vs top_n=2. We concentrate the whole
                                           # book into the engine's #1 ranked mover for the last ~30h.
-                                          # DQ guardrails stay intact: max_position_pct 0.80 keeps a
-                                          # 20% cash buffer, the convex survival taper collapses gross
-                                          # before the 30% gate, and Sentinel pre-trade checks every
+                                          # DQ guardrails stay intact: max_position_pct 0.90 keeps a
+                                          # 10% cash buffer (+ harvester grid fuel), the convex survival
+                                          # taper collapses gross before the 30% gate, and Sentinel
+                                          # pre-trade checks every
                                           # entry. The harvester banks this single name's rips to USDT
                                           # so realized gains can never round-trip away.
       vol_tilt_weight: 0.7                # grid-fuel tilt: our harvester IS a grid (earns from
