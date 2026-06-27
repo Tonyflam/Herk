@@ -183,6 +183,18 @@ execution:
     FET:   "0x031b41e504677879370e9DBcF937283A8691Fa7f"  # Fetch/ASI; +12% 24h; verified two-way (326 sells/24h)
     PENGU: "0x6418c0dd099a9FDA397C766304CDd918233E8847"  # Pudgy Penguins; +10% 24h; verified two-way
     APE:   "0x8f86a15EC17cb3369d8b3E666dAdBC11daA82b79"  # ApeCoin; verified two-way (539 sells/24h)
+    # --- Final-day routing widening (added 2026-06-27, ~35h left). Each verified
+    # on-chain (symbol()/decimals() == 18dp) AND DexScreener two-way sell flow on a
+    # >=$1M BSC pool. These are NOT stronger than AAVE today (AAVE +12%/24h leads
+    # them all) — they are INSURANCE: if AAVE rolls over in the final sprint the
+    # autonomous engine has a wider liquid field to rotate into instead of stalling
+    # in cash. Engine still ranks by Binance momentum, so it only rotates here if
+    # one genuinely out-moves AAVE by the rotation edge (won't churn otherwise).
+    ASTER: "0x000Ae314E2A2172a039B26378814C252734f556A"  # $6.0M liq; 341 sells/24h; 18dp
+    FF:    "0xAC23B90A79504865D52B49B327328411a23d4dB2"  # $4.1M liq; 2938 sells/24h; 18dp
+    BANANAS31: "0x3d4f0513E8a29669B960f9dBcA61861548A9A760"  # $3.8M liq; 3674 sells/24h; 18dp (on-chain sym $BANANA)
+    ZEC:   "0x1Ba42e5193dfA8B03D15dd1B86a3113bbBEF8Eeb"  # $2.6M liq; 1333 sells/24h; 18dp
+    SFP:   "0xD41FDb03Ba84762dD66a0af1a6C8540FF1ba5dfb"  # $1.2M liq; 287 sells/24h; 18dp
 
 scoring:
   # Competition scoring assumptions HELM encodes. CONFIRM against the official
