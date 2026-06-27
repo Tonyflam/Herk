@@ -547,6 +547,33 @@ class Agent:
                 return sym                           # holding idle cash for the dip
         return ""
 
+    def _swing_dip_pending(self) -> str:
+        """Swing symbol with a PENDING MANUAL dip-rebuy (rotation's narrower guard).
+
+        Like ``_swing_block_symbol`` but WITHOUT the harvester-ownership clause.
+        The volatility harvester actively WANTS more inventory in its symbol, so
+        rotation may consolidate dead weight INTO the harvested leader -- that is
+        precisely how a faded second holding gets recycled into the engine's #1
+        when that #1 is also the harvested name (e.g. top_n=1 on the leader).
+        Only a genuine manual dip-hold must still keep rotation off the name:
+        armed after an operator sell (never undo the exit), or a standing absolute
+        rebuy target with idle cash earmarked for it. Empty when nothing pends.
+        """
+        rc = self.settings.risk
+        if not getattr(rc, "swing_enabled", False):
+            return ""
+        sym = (getattr(rc, "swing_symbol", "") or "").upper()
+        if not sym:
+            return ""
+        p = self.portfolio
+        if p.swing_armed:
+            return sym                               # armed after a sell: never re-buy
+        if self._swing_override_px() is not None:
+            idle_cash = p.cash - max(rc.gas_usd_per_swap, 0.0)
+            if idle_cash >= self.settings.contest.dust_floor_usd:
+                return sym                           # holding idle cash for the dip
+        return ""
+
     def _swing_sell(self, sym, snap, prices, actions, dry_run, now) -> None:
         """Liquidate the entire swing-symbol position to cash and arm the rebuy."""
         p = self.portfolio
@@ -896,10 +923,12 @@ class Agent:
         if not ranked:
             return
         orig_top_syms = {x.symbol for x in ranked}   # full top-N before swing-block filtering
-        swing_block = self._swing_block_symbol()
+        swing_block = self._swing_dip_pending()
         if swing_block:
             # Don't let rotation steer freed capital into a name the operator is
-            # deliberately holding in cash for a manual dip rebuy.
+            # deliberately holding in cash for a manual dip rebuy. (The harvester
+            # is intentionally NOT a block here: consolidating dead weight INTO the
+            # harvested leader is the whole point -- see _swing_dip_pending.)
             ranked = [x for x in ranked if x.symbol.upper() != swing_block]
             if not ranked:
                 return

@@ -1357,3 +1357,62 @@ def test_autopilot_thresholds_tunable_via_env(tmp_path, monkeypatch):
         agent.close()
 
 
+# ============================================================================
+# Rotation x harvester deadlock fix: consolidate a faded second holding INTO the
+# harvested leader. The harvester "owns" its symbol for entries, but rotation
+# WANTS to recycle dead weight into it -- otherwise top_n=1 on the harvested #1
+# strands the faded name forever.
+# ============================================================================
+def test_swing_dip_pending_ignores_harvester(tmp_path, monkeypatch):
+    """_swing_dip_pending blocks only a genuine manual dip-hold, not the harvester.
+
+    _swing_block_symbol blocks the harvested name unconditionally (entries stay
+    off it). The rotation-only _swing_dip_pending must NOT -- so dead weight can
+    be consolidated into the harvested leader -- yet it must still respect an
+    armed manual sell or a standing absolute target with idle cash.
+    """
+    agent = _hagent(tmp_path, monkeypatch)   # harvest_enabled + swing on AAVE
+    try:
+        _book(agent, cash=0.5, positions=[_pos("AAVE", qty=0.7, price=85.0)])
+        # Harvester owns AAVE for ENTRIES...
+        assert agent._swing_block_symbol() == "AAVE"
+        # ...but ROTATION may consolidate into it (no manual hold pending).
+        assert agent._swing_dip_pending() == ""
+        # An armed manual sell still blocks rotation (never undo the exit).
+        agent.portfolio.swing_armed = True
+        assert agent._swing_dip_pending() == "AAVE"
+        agent.portfolio.swing_armed = False
+        # A standing absolute target with idle cash also blocks rotation.
+        monkeypatch.setenv("HELM_SWING_REBUY_PX", "80.0")
+        agent.portfolio.cash = 40.0
+        assert agent._swing_dip_pending() == "AAVE"
+    finally:
+        agent.close()
+
+
+def test_rotation_consolidates_faded_holding_into_harvested_leader(tmp_path, monkeypatch):
+    """The deadlock fix: a big faded holding is recycled INTO the harvested #1.
+
+    With the harvester owning the engine's sole ranked leader (AAVE), the old
+    guard filtered AAVE out of the leader set and bailed, stranding a large faded
+    holding (XPL) indefinitely. _swing_dip_pending unblocks rotation: it sells the
+    stale chunk to cash so the harvester's dip-buy can redeploy it into the leader.
+    """
+    agent = _hagent(tmp_path, monkeypatch)   # harvest_enabled + swing on AAVE
+    try:
+        # ~98% in a faded, aged, unranked holding; almost no cash (constrained).
+        _book(agent, cash=1.0, positions=[_pos("XPL", qty=600.0, price=0.10)])
+        prices = {"XPL": 0.10, "AAVE": 95.0}
+        snap = _snap(ranked=[_sig("AAVE", 2.7, 95.0)],
+                     signals=[_sig("AAVE", 2.7, 95.0), _sig("XPL", 0.1, 0.10)])
+        # Contract: harvester owns AAVE for entries, but rotation may consolidate.
+        assert agent._swing_block_symbol() == "AAVE"
+        assert agent._swing_dip_pending() == ""
+        actions: list = []
+        agent._run_rotation(snap, prices, None, actions, dry_run=False, now=_NOW)
+        assert "XPL" not in agent.portfolio.positions          # faded chunk recycled
+        assert any(a.kind == "exit" and "rotate->AAVE" in a.detail for a in actions)
+    finally:
+        agent.close()
+
+
