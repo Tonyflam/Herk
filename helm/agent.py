@@ -758,6 +758,13 @@ class Agent:
             p.harvest_anchor_px = px
             p.harvest_peak_px = px
             return
+        # Trend-deploy: in a confirmed uptrend while we are still UNDER-DEPLOYED in
+        # the leader, put idle cash to work in it (ride the move) instead of banking
+        # into the rip / waiting for a dip that may not come. Fires before the grid
+        # and short-circuits the cycle when it acts; once we reach the deploy
+        # ceiling the normal bank/dip grid takes over to harvest oscillation.
+        if self._maybe_trend_deploy(sym, px, posture, snap, prices, actions, dry_run, now):
+            return
         if px >= anchor * (1.0 + step):
             p.harvest_anchor_px = px                       # rip: bank a slice
             p.harvest_peak_px = px                          # reset the trail to the new high
@@ -887,6 +894,83 @@ class Agent:
                                       "stop": round(stop, 6), "tp": round(tp, 6)})
         actions.append(Action("entry", sym,
             f"harvest-dip ${fill.notional_usd:.2f} @ {fill.price:.4f}"))
+
+    def _maybe_trend_deploy(self, sym, px, posture, snap, prices, actions, dry_run, now) -> bool:
+        """Deploy idle cash into the leader during a confirmed uptrend (ride the move).
+
+        The grid alone parks capital in cash through an uptrend (it banks rips and
+        never sees a full-step dip), missing the trend. This is the buy-only-ladder
+        lean the field's grid leaders use when momentum is up. It fires only when:
+
+          • the feature is enabled (``harvest_trend_deploy``), and
+          • new risk is not halted and the kill-switch is clear, and
+          • the swing symbol's fast (few-hour) momentum is positive (a real uptrend), and
+          • we are UNDER-DEPLOYED — held value below ``ceiling_frac`` of the position cap
+            (hysteresis: leaves headroom above for the bank/dip band so deploy and grid
+            never fight), and
+          • there is spare idle cash above the gas reserve AND posture gross headroom.
+
+        It spends only on-hand cash (never leverage) and is bounded by the position
+        cap, the posture gross cap and the survival taper, so it can never breach the
+        30% DQ gate. Returns True (short-circuiting the grid for this cycle) when it
+        deploys, re-anchoring the grid at the new cost base.
+        """
+        rc = self.settings.risk
+        if not getattr(rc, "harvest_trend_deploy", False):
+            return False
+        if getattr(posture, "halt_new_risk", False) or self.sentinel.kill_switch_engaged():
+            return False
+        p = self.portfolio
+        if p.swing_flat:                                 # autopilot latched cash on a roll-over — defer
+            return False
+        sig = next((x for x in snap.signals if x.symbol.upper() == sym), None)
+        if sig is None or sig.fast_return <= 0.0:        # only into a real short-horizon uptrend
+            return False
+        equity = p.equity(prices)
+        if equity <= 0:
+            return False
+        ceil_frac = self._harvest_param(
+            "HELM_TREND_CEILING", getattr(rc, "harvest_trend_deploy_ceiling_frac", 0.85), 0.1, 1.0)
+        ceiling = rc.max_position_pct * equity * ceil_frac
+        pos = p.positions.get(sym)
+        held_val = (pos.qty * px) if pos is not None and pos.qty > 0 else 0.0
+        if held_val >= ceiling:                          # already adequately deployed
+            return False
+        frac = self._harvest_param(
+            "HELM_TREND_FRAC", getattr(rc, "harvest_trend_deploy_frac", 0.5), 0.05, 1.0)
+        reserve = max(rc.gas_usd_per_swap, 0.0)
+        idle = max(0.0, p.cash - reserve)
+        gross_room = max(0.0, posture.max_gross_pct * equity - p.gross_usd(prices))
+        spend = min(idle * frac, ceiling - held_val, gross_room)
+        if spend < self._harvest_min_trade():
+            return False
+        if dry_run:
+            actions.append(Action("dry_run", sym, f"would trend-deploy ${spend:.2f} @ {px:.4f}"))
+            return True
+        exec_price = (sig.price if sig else None) or px
+        if self._x402_ready():
+            exec_price = self._x402_prebuy(sym, exec_price, now)
+        order = Order(sym, "buy", ref_price=exec_price, notional_usd=spend,
+                      liquidity_usd=1e9, reason="harvest_trend")
+        fill = self.executor.execute(order)
+        if not fill.ok or fill.notional_usd <= 0 or fill.qty <= 0:
+            self.ledger.append("alert", {"reason": "harvest_trend_unfilled",
+                                          "symbol": sym, "note": fill.note[:80]})
+            return False
+        # Wide protective stop (same as the dip-buy core) — the grid manages profit.
+        stop_dist = fill.price * 0.20
+        stop = max(0.0, fill.price - stop_dist)
+        tp = fill.price * 1.50
+        p.apply_buy(fill, stop, tp, stop_dist)
+        # Re-anchor the grid at the new cost base so banking/dip references the deploy.
+        p.harvest_anchor_px = fill.price
+        if fill.price > p.harvest_peak_px:
+            p.harvest_peak_px = fill.price
+        self.ledger.append("trade", {**asdict(fill), "reason": "harvest_trend",
+                                      "stop": round(stop, 6), "tp": round(tp, 6)})
+        actions.append(Action("entry", sym,
+            f"trend-deploy ${fill.notional_usd:.2f} @ {fill.price:.4f}"))
+        return True
 
     # ------------------------------------------------------------- rotation
     def _position_age_hours(self, pos: Position, now: datetime) -> float:

@@ -321,6 +321,15 @@ profiles:
       harvest_trade_frac: 0.20
       harvest_min_trade_usd: 4.0
       harvest_trail_giveback_pct: 0.03   # scale a slice out on a 3% give-back from a fresh peak
+      # Trend-deploy: in a confirmed uptrend while still under-deployed, put idle
+      # cash to work in the leader instead of parking it in cash (the mean-reversion
+      # grid's blind spot — it banks rips and waits for a dip that may not come, so
+      # capital freed by a rotation sits idle through the move). Bounded by the
+      # position cap, the posture gross cap and the survival taper, so it can never
+      # breach the DQ gate. Live-tunable via HELM_TREND_FRAC / HELM_TREND_CEILING.
+      harvest_trend_deploy: true
+      harvest_trend_deploy_frac: 0.5            # deploy 50% of idle cash per cycle while trending
+      harvest_trend_deploy_ceiling_frac: 0.85   # up to 85% of the position cap (leaves grid headroom)
       # Autopilot: autonomous momentum risk-on/off. Steps the WHOLE book to cash
       # when the leader's fast (few-hour) momentum rolls over past exit_mom, and
       # buys back into the leader once it turns up past entry_mom. The gap between

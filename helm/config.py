@@ -146,6 +146,23 @@ class RiskCfg:
     # AHEAD of a deeper dip (scale out as a move rolls over). 0.0 = OFF (pure band
     # grid -- existing behaviour). Live-tunable via HELM_HARVEST_GIVEBACK.
     harvest_trail_giveback_pct: float = 0.0
+    # --- Trend-deploy (autonomous "put idle cash to work in an uptrend") ---
+    # A pure mean-reversion grid sits in cash through a strong uptrend: every rise
+    # trips the rip-bank (sell) and price never dips a full step, so freed capital
+    # never re-enters and the move is missed. This is the spot-grid blind spot the
+    # field's leaders avoid by leaning their ladder BUY-ONLY when momentum is up.
+    # When enabled, before the grid runs HELM checks the swing symbol's fast
+    # (few-hour) momentum: if it is rising AND we are UNDER-DEPLOYED in the name,
+    # it deploys a slice of idle cash into it (rides the trend), then re-anchors
+    # the grid at the new cost base. It fires only below ``ceiling_frac`` of the
+    # position cap (hysteresis -> leaves headroom for the bank/dip band so deploy
+    # and grid never fight), spends only on-hand cash, and is bounded by the
+    # posture gross cap + survival taper + halt + kill-switch -- so it can never
+    # breach the 30% DQ gate. OFF by default; ON in the live `max` profile.
+    # Live-tunable via HELM_TREND_FRAC / HELM_TREND_CEILING.
+    harvest_trend_deploy: bool = False
+    harvest_trend_deploy_frac: float = 0.5            # frac of idle cash to deploy per cycle while trending
+    harvest_trend_deploy_ceiling_frac: float = 0.85   # deploy only up to this frac of the position cap
     # --- Autopilot: autonomous momentum risk-on/off (step to cash on a roll-over,
     # buy back on an up-turn) using the leader's fast (few-hour) momentum as the
     # gauge, with a dead-band between the two thresholds to damp whipsaw. OFF by

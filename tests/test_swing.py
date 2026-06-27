@@ -647,6 +647,110 @@ def test_harvest_armed_swing_short_circuits(tmp_path, monkeypatch):
         agent.close()
 
 
+def test_trend_deploy_puts_idle_cash_to_work_in_uptrend(tmp_path, monkeypatch):
+    """In a confirmed uptrend while UNDER-DEPLOYED, idle cash (e.g. freed by a
+    rotation) is put to work in the leader -- riding the move instead of sitting in
+    cash through it. This is the mean-reversion grid's blind spot the trend-deploy
+    closes (the field's grid leaders lean their ladder buy-only when momentum is up)."""
+    agent = _hagent(tmp_path, monkeypatch,
+                    harvest_trend_deploy=True, max_position_pct=0.90)
+    try:
+        # 0.35 AAVE @ ~$90 (~$31) + $63 idle: ~34% deployed, ~66% cash (our live shape).
+        _book(agent, cash=63.0, positions=[_pos("AAVE", qty=0.35, price=90.0)])
+        agent.portfolio.harvest_anchor_px = 88.0          # grid already armed
+        sig = _sig("AAVE", 2.0, 90.0)
+        sig.fast_return = 0.05                            # short-horizon uptrend
+        actions: list = []
+        agent._run_harvest(_snap(ranked=[sig]), {"AAVE": 90.0}, _posture(),
+                           actions, dry_run=False, now=_NOW)
+
+        assert any(a.kind == "entry" and "trend-deploy" in a.detail for a in actions)
+        assert agent.portfolio.cash < 40.0                # ~half the idle cash deployed
+        assert agent.portfolio.positions["AAVE"].qty > 0.35   # accumulated into the leader
+        assert agent.portfolio.harvest_anchor_px > 88.0   # re-anchored at the new cost base
+    finally:
+        agent.close()
+
+
+def test_trend_deploy_stops_at_ceiling_then_grid_harvests(tmp_path, monkeypatch):
+    """Once the leader is adequately deployed (held value at/above the deploy
+    ceiling) trend-deploy stands down and the ordinary grid takes over -- banking
+    the rip -- so deploy and harvester never fight (the hysteresis that avoids churn)."""
+    agent = _hagent(tmp_path, monkeypatch,
+                    harvest_trend_deploy=True, max_position_pct=0.90)
+    try:
+        # Fully deployed: ~$90 AAVE, ~$5 cash -> held value above the 0.85*0.90 ceiling.
+        _book(agent, cash=5.0, positions=[_pos("AAVE", qty=1.0, price=90.0)])
+        agent.portfolio.harvest_anchor_px = 86.0
+        sig = _sig("AAVE", 2.0, 90.0)
+        sig.fast_return = 0.05
+        actions: list = []
+        agent._run_harvest(_snap(ranked=[sig]), {"AAVE": 90.0}, _posture(),
+                           actions, dry_run=False, now=_NOW)
+
+        assert not any("trend-deploy" in a.detail for a in actions)   # ceiling reached
+        assert any(a.kind == "exit" and "harvest-bank" in a.detail for a in actions)
+    finally:
+        agent.close()
+
+
+def test_trend_deploy_skips_without_uptrend(tmp_path, monkeypatch):
+    """Flat/negative short-horizon momentum is NOT chased -- idle cash deploys only
+    into a genuine uptrend (a sub-step wiggle with no momentum just holds)."""
+    agent = _hagent(tmp_path, monkeypatch,
+                    harvest_trend_deploy=True, max_position_pct=0.90)
+    try:
+        _book(agent, cash=63.0, positions=[_pos("AAVE", qty=0.35, price=90.0)])
+        agent.portfolio.harvest_anchor_px = 88.0
+        sig = _sig("AAVE", 2.0, 89.0)
+        sig.fast_return = 0.0                            # no uptrend
+        actions: list = []
+        agent._run_harvest(_snap(ranked=[sig]), {"AAVE": 89.0}, _posture(),
+                           actions, dry_run=False, now=_NOW)
+
+        assert actions == []                             # no deploy; within band -> no grid trade
+        assert agent.portfolio.cash == 63.0
+    finally:
+        agent.close()
+
+
+def test_trend_deploy_blocked_when_halted_or_cash_latched(tmp_path, monkeypatch):
+    """Trend-deploy ADDS risk, so it stands down under the drawdown halt, and it
+    defers to the autopilot's cash latch (``swing_flat``) -- never deploying against
+    an explicit step-aside-to-cash decision. Both keep the DQ gate inviolate."""
+    # (a) drawdown halt
+    agent = _hagent(tmp_path, monkeypatch,
+                    harvest_trend_deploy=True, max_position_pct=0.90)
+    try:
+        _book(agent, cash=63.0, positions=[_pos("AAVE", qty=0.35, price=90.0)])
+        agent.portfolio.harvest_anchor_px = 88.0
+        sig = _sig("AAVE", 2.0, 89.0)
+        sig.fast_return = 0.05
+        actions: list = []
+        agent._run_harvest(_snap(ranked=[sig]), {"AAVE": 89.0}, _halted_posture(),
+                           actions, dry_run=False, now=_NOW)
+        assert not any("trend-deploy" in a.detail for a in actions)
+        assert agent.portfolio.cash == 63.0
+    finally:
+        agent.close()
+    # (b) autopilot cash latch
+    agent2 = _hagent(tmp_path, monkeypatch,
+                     harvest_trend_deploy=True, max_position_pct=0.90)
+    try:
+        _book(agent2, cash=63.0, positions=[_pos("AAVE", qty=0.35, price=90.0)])
+        agent2.portfolio.harvest_anchor_px = 88.0
+        agent2.portfolio.swing_flat = True               # autopilot latched cash on a roll-over
+        sig = _sig("AAVE", 2.0, 89.0)
+        sig.fast_return = 0.05
+        actions2: list = []
+        agent2._run_harvest(_snap(ranked=[sig]), {"AAVE": 89.0}, _posture(),
+                            actions2, dry_run=False, now=_NOW)
+        assert not any("trend-deploy" in a.detail for a in actions2)
+        assert agent2.portfolio.cash == 63.0
+    finally:
+        agent2.close()
+
+
 def test_harvest_anchor_persists_across_restart(tmp_path, monkeypatch):
     """The moving anchor survives a reload so the grid is continuous across the
     agent's frequent restarts."""
