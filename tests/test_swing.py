@@ -659,7 +659,8 @@ def test_trend_deploy_puts_idle_cash_to_work_in_uptrend(tmp_path, monkeypatch):
         _book(agent, cash=63.0, positions=[_pos("AAVE", qty=0.35, price=90.0)])
         agent.portfolio.harvest_anchor_px = 88.0          # grid already armed
         sig = _sig("AAVE", 2.0, 90.0)
-        sig.fast_return = 0.05                            # short-horizon uptrend
+        sig.mom_blended_return = 0.16                     # confirmed multi-horizon up-drift
+        sig.fast_return = -0.002                          # flat on the hour (consolidating)
         actions: list = []
         agent._run_harvest(_snap(ranked=[sig]), {"AAVE": 90.0}, _posture(),
                            actions, dry_run=False, now=_NOW)
@@ -683,7 +684,8 @@ def test_trend_deploy_stops_at_ceiling_then_grid_harvests(tmp_path, monkeypatch)
         _book(agent, cash=5.0, positions=[_pos("AAVE", qty=1.0, price=90.0)])
         agent.portfolio.harvest_anchor_px = 86.0
         sig = _sig("AAVE", 2.0, 90.0)
-        sig.fast_return = 0.05
+        sig.mom_blended_return = 0.16
+        sig.fast_return = 0.01
         actions: list = []
         agent._run_harvest(_snap(ranked=[sig]), {"AAVE": 90.0}, _posture(),
                            actions, dry_run=False, now=_NOW)
@@ -694,24 +696,43 @@ def test_trend_deploy_stops_at_ceiling_then_grid_harvests(tmp_path, monkeypatch)
         agent.close()
 
 
-def test_trend_deploy_skips_without_uptrend(tmp_path, monkeypatch):
-    """Flat/negative short-horizon momentum is NOT chased -- idle cash deploys only
-    into a genuine uptrend (a sub-step wiggle with no momentum just holds)."""
+def test_trend_deploy_skips_without_uptrend_or_on_breakdown(tmp_path, monkeypatch):
+    """Two stand-downs: (a) no established up-drift -> nothing to ride; (b) the leader
+    is in an acute short-horizon breakdown (fast return at/under the autopilot exit
+    threshold) -> never add into a knife even if the longer trend was up."""
+    # (a) no multi-horizon up-drift at all
     agent = _hagent(tmp_path, monkeypatch,
                     harvest_trend_deploy=True, max_position_pct=0.90)
     try:
         _book(agent, cash=63.0, positions=[_pos("AAVE", qty=0.35, price=90.0)])
         agent.portfolio.harvest_anchor_px = 88.0
         sig = _sig("AAVE", 2.0, 89.0)
-        sig.fast_return = 0.0                            # no uptrend
+        sig.mom_blended_return = 0.0                     # no up-drift on any horizon
+        sig.fast_return = 0.0
         actions: list = []
         agent._run_harvest(_snap(ranked=[sig]), {"AAVE": 89.0}, _posture(),
                            actions, dry_run=False, now=_NOW)
-
         assert actions == []                             # no deploy; within band -> no grid trade
         assert agent.portfolio.cash == 63.0
     finally:
         agent.close()
+    # (b) longer trend up, but an acute short-horizon breakdown -> knife guard
+    agent2 = _hagent(tmp_path, monkeypatch,
+                     harvest_trend_deploy=True, max_position_pct=0.90,
+                     autopilot_exit_mom=-0.015)
+    try:
+        _book(agent2, cash=63.0, positions=[_pos("AAVE", qty=0.35, price=90.0)])
+        agent2.portfolio.harvest_anchor_px = 88.0
+        sig = _sig("AAVE", 2.0, 89.0)
+        sig.mom_blended_return = 0.16                    # established trend WAS up
+        sig.fast_return = -0.03                          # ...but now breaking down hard
+        actions2: list = []
+        agent2._run_harvest(_snap(ranked=[sig]), {"AAVE": 89.0}, _posture(),
+                            actions2, dry_run=False, now=_NOW)
+        assert not any("trend-deploy" in a.detail for a in actions2)
+        assert agent2.portfolio.cash == 63.0
+    finally:
+        agent2.close()
 
 
 def test_trend_deploy_blocked_when_halted_or_cash_latched(tmp_path, monkeypatch):
@@ -725,7 +746,8 @@ def test_trend_deploy_blocked_when_halted_or_cash_latched(tmp_path, monkeypatch)
         _book(agent, cash=63.0, positions=[_pos("AAVE", qty=0.35, price=90.0)])
         agent.portfolio.harvest_anchor_px = 88.0
         sig = _sig("AAVE", 2.0, 89.0)
-        sig.fast_return = 0.05
+        sig.mom_blended_return = 0.16
+        sig.fast_return = 0.01
         actions: list = []
         agent._run_harvest(_snap(ranked=[sig]), {"AAVE": 89.0}, _halted_posture(),
                            actions, dry_run=False, now=_NOW)
@@ -741,7 +763,8 @@ def test_trend_deploy_blocked_when_halted_or_cash_latched(tmp_path, monkeypatch)
         agent2.portfolio.harvest_anchor_px = 88.0
         agent2.portfolio.swing_flat = True               # autopilot latched cash on a roll-over
         sig = _sig("AAVE", 2.0, 89.0)
-        sig.fast_return = 0.05
+        sig.mom_blended_return = 0.16
+        sig.fast_return = 0.01
         actions2: list = []
         agent2._run_harvest(_snap(ranked=[sig]), {"AAVE": 89.0}, _posture(),
                             actions2, dry_run=False, now=_NOW)

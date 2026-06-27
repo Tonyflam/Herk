@@ -904,7 +904,9 @@ class Agent:
 
           • the feature is enabled (``harvest_trend_deploy``), and
           • new risk is not halted and the kill-switch is clear, and
-          • the swing symbol's fast (few-hour) momentum is positive (a real uptrend), and
+          • the leader is in a confirmed multi-horizon up-drift (``mom_blended_return``
+            positive) and is NOT in an acute short-horizon breakdown (fast return above
+            the autopilot's exit threshold) — ride an established trend, never a knife, and
           • we are UNDER-DEPLOYED — held value below ``ceiling_frac`` of the position cap
             (hysteresis: leaves headroom above for the bank/dip band so deploy and grid
             never fight), and
@@ -924,7 +926,19 @@ class Agent:
         if p.swing_flat:                                 # autopilot latched cash on a roll-over — defer
             return False
         sig = next((x for x in snap.signals if x.symbol.upper() == sym), None)
-        if sig is None or sig.fast_return <= 0.0:        # only into a real short-horizon uptrend
+        if sig is None:
+            return False
+        # Deploy on the CONFIRMED multi-horizon up-drift (the established trend), not
+        # the brittle few-hour tick: a healthy consolidation inside a strong up-move
+        # (e.g. +30%/72h but flat on the hour) must NOT strand idle cash in a green
+        # tape — that lone fast-tick gate is what left two thirds of the book dead in
+        # cash. ``mom_blended_return`` is the positive-drift blend across all horizons
+        # (zero only when no horizon is up), so it is the right "is this name trending"
+        # gauge. Still stand down on an ACUTE short-horizon breakdown — reuse the
+        # autopilot's exit threshold so we never add into a name autopilot is bailing
+        # out of (the two systems stay in agreement; no fighting, no knife-catching).
+        exit_floor = float(getattr(rc, "autopilot_exit_mom", -0.015))
+        if sig.mom_blended_return <= 0.0 or sig.fast_return <= exit_floor:
             return False
         equity = p.equity(prices)
         if equity <= 0:
