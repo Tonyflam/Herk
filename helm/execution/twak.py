@@ -21,7 +21,7 @@ when actually asked to act live.
 from __future__ import annotations
 
 import json
-import math
+import os
 import re
 import shutil
 import subprocess
@@ -111,6 +111,20 @@ class TwakAdapter(ExecutionAdapter):
     def _pw(self) -> list[str]:
         pw = self.s.secrets.twak_wallet_password
         return ["--password", pw] if pw else []
+
+    def _slippage_pct(self) -> str:
+        """Swap slippage tolerance % for the CLI (default 5, env-tunable).
+
+        Generous by default in the endgame: a fast-moving quote on a liquid major
+        still fills (a revert forfeits the whole move), while real slippage on a
+        small order stays tiny. Live-tunable via HELM_SWAP_SLIPPAGE_PCT.
+        """
+        raw = (os.environ.get("HELM_SWAP_SLIPPAGE_PCT", "") or "").strip()
+        try:
+            v = float(raw) if raw else 5.0
+        except ValueError:
+            v = 5.0
+        return f"{max(0.5, min(15.0, v)):g}"
 
     # --------------------------------------------------------- competition
     def auth_setup(self) -> TwakResult:
@@ -235,18 +249,16 @@ class TwakAdapter(ExecutionAdapter):
             amount = f"{order.notional_usd:.6f}"
             from_asset, to_asset = self.base_asset, alt
         else:
-            # Truncate (round DOWN) to 8 dp. A half-up round of a full-position
-            # sell can request ~1e-9 MORE than the on-chain balance and revert
-            # the swap ("transfer amount exceeds balance"); truncation is always
-            # <= the held balance, leaving at most sub-cent dust.
-            amount = f"{math.floor(order.qty * 1e8) / 1e8:.8f}"
+            amount = f"{order.qty:.8f}"
             from_asset, to_asset = alt, self.base_asset
             # Source leg is the alt (by address); pin its decimals so the CLI
             # parses the sell amount correctly (DOGE is 8 dp; other majors 18).
             extra += ["--decimals", str(self._token_decimals(sym))]
 
         args = ["swap", amount, from_asset, to_asset,
-                "--chain", self._chain_name(), *extra, *self._pw()]
+                "--chain", self._chain_name(),
+                "--slippage", self._slippage_pct(),
+                *extra, *self._pw()]
         quote_only = self._quote_only()
         if quote_only:
             args.append("--quote-only")
@@ -258,11 +270,14 @@ class TwakAdapter(ExecutionAdapter):
         )
 
         if not res.ok:
-            # Surface the real CLI error (stderr/stdout) so a live failure is
-            # diagnosable from the ledger/logs instead of a bare "non-zero exit".
-            detail = " ".join((res.stderr or res.stdout or res.note or "swap failed").split())[:160]
+            # Surface the REAL CLI error: the last non-empty stderr line, not the
+            # leading "--password is visible in shell history" security warning,
+            # which otherwise masks the actual revert/slippage/routing reason.
+            blob = (res.stderr or res.stdout or "").strip()
+            lines = [ln.strip() for ln in blob.splitlines() if ln.strip()]
+            real = lines[-1] if lines else (res.note or "swap failed")
             return Fill(order.symbol, order.side, 0, order.ref_price, 0, 0, est_slip,
-                        _now_iso(), "twak", False, detail)
+                        _now_iso(), "twak", False, real[:160])
 
         fill = self._parse_swap(res, order, est_slip)
         fill.note = "quote-only (simulated)" if quote_only else "live swap"

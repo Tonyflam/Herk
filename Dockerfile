@@ -17,7 +17,7 @@ RUN apt-get update \
       curl gnupg ca-certificates build-essential git \
  && curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
- && npm install -g @trustwallet/cli \
+ && npm install -g @trustwallet/cli@0.19.1 \
  && apt-get purge -y gnupg \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
