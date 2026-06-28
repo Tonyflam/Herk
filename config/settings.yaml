@@ -288,7 +288,13 @@ profiles:
       # remaining ~10% stays live as grid-fuel for the harvester's buy-the-dip leg.
       # Single-name gap-to-DQ is still ~33% (we sit at ~9% DD) and the convex survival
       # taper + 30% gate are untouched, so this lifts the ceiling without opening the floor.
-      max_position_pct: 0.90
+      # LAST-SPRINT MAX VARIANCE (2026-06-28, <24h, we are BEHIND at ~+2% vs leader ~+8%):
+      # raised 0.90 -> 0.98. A behind player needs VARIANCE, not EV — +2% and -4% are
+      # both "lost the prize," so the symmetric downside barely matters while the upside
+      # tail is our only path to a paid spot. Near-100% into the engine's #1 relative-
+      # strength name maximizes capture of any market reversal. The 28% halt, convex
+      # survival taper and 30% DQ gate are UNCHANGED, so this cannot breach the floor.
+      max_position_pct: 0.98
       # FINAL-DAY faster leadership tracking: halve the anti-whipsaw min-hold (4.0 -> 2.0h)
       # so the agent consolidates into the engine's current #1 mover within ~2h of a restart
       # instead of lagging a third of the contest that remains. rotation_min_edge 0.40 still
