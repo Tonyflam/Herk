@@ -42,6 +42,10 @@ class SymbolSignal:
     passes_liquidity: bool = False
     passes_quality: bool = False
     passes_cost: bool = False
+    # Short side (perps): symmetric quality + downside-drift cost gates.
+    mom_blended_drawdown: float = 0.0  # downside drift sum(w·max(-r,0)) for the short cost gate
+    passes_quality_short: bool = False
+    passes_cost_short: bool = False
     source: str = ""
     note: str = ""
 
@@ -49,16 +53,25 @@ class SymbolSignal:
     def eligible(self) -> bool:
         return self.passes_liquidity and self.passes_quality and self.passes_cost
 
+    @property
+    def short_eligible(self) -> bool:
+        return self.passes_liquidity and self.passes_quality_short and self.passes_cost_short
+
 
 @dataclass
 class SignalSnapshot:
     regime: RegimeAssessment
     signals: list[SymbolSignal]          # everything we scored (for transparency)
-    ranked: list[SymbolSignal]           # eligible only, composite desc
+    ranked: list[SymbolSignal]           # eligible only, composite desc (long candidates)
     cost_bps: float = 0.0
+    ranked_short: list[SymbolSignal] = field(default_factory=list)  # short candidates, composite asc
 
     def top(self, n: int) -> list[SymbolSignal]:
         return self.ranked[: max(0, n)]
+
+    def shorts(self, n: int) -> list[SymbolSignal]:
+        """Strongest down-movers eligible to short (most-negative composite first)."""
+        return self.ranked_short[: max(0, n)]
 
 
 class SignalEngine:
@@ -100,14 +113,17 @@ class SignalEngine:
             sig.atr_pct = (sig.atr / sig.price) if sig.price > 0 else 0.0
 
             blended = 0.0
+            blended_dn = 0.0
             for L, w in zip(lookbacks, weights):
                 r = M.lookback_return(closes, L)
                 va = M.vol_adjusted_return(r, vh, L)
                 if r is not None:
                     sig.lookback_returns[L] = r
-                    blended += w * max(r, 0.0)  # cost gate uses positive drift only
+                    blended += w * max(r, 0.0)      # long cost gate: positive drift only
+                    blended_dn += w * max(-r, 0.0)  # short cost gate: downside drift only
                 vol_adj[L].append(va if va is not None else float("nan"))
             sig.mom_blended_return = blended
+            sig.mom_blended_drawdown = blended_dn
             # Fast momentum gauge for the autonomous autopilot (few-hour return on
             # the same 1h closes the engine already holds — no extra data call).
             fh = int(getattr(s.signals, "autopilot_fast_hours", 3) or 3)
@@ -154,10 +170,19 @@ class SignalEngine:
             row.passes_quality = row.composite >= min_q
             move_bps = row.mom_blended_return * 10_000.0
             row.passes_cost = (move_bps >= cost_bps) if gate_cost else True
+            # Short side: symmetric quality (weak cross-section) + real downside drift.
+            row.passes_quality_short = row.composite <= -min_q
+            move_dn_bps = row.mom_blended_drawdown * 10_000.0
+            row.passes_cost_short = (move_dn_bps >= cost_bps) if gate_cost else True
 
         ranked = sorted(
             (r for r in rows if r.eligible),
             key=lambda r: r.composite,
             reverse=True,
         )
-        return SignalSnapshot(regime=regime, signals=rows, ranked=ranked, cost_bps=cost_bps)
+        ranked_short = sorted(
+            (r for r in rows if r.short_eligible),
+            key=lambda r: r.composite,
+        )
+        return SignalSnapshot(regime=regime, signals=rows, ranked=ranked,
+                              cost_bps=cost_bps, ranked_short=ranked_short)

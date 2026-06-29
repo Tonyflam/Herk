@@ -36,10 +36,11 @@ class Order:
     symbol: str
     side: str                 # 'buy' | 'sell'
     ref_price: float
-    notional_usd: float = 0.0  # used for buys
-    qty: float = 0.0           # used for sells
+    notional_usd: float = 0.0  # used for buys / opens (notional sizing)
+    qty: float = 0.0           # used for sells / closes (exact-unit sizing)
     liquidity_usd: float = 0.0
     reason: str = ""
+    reduce_only: bool = False  # perps: True = close/reduce only (never opens a new position)
 
 
 @dataclass

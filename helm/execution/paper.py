@@ -20,14 +20,18 @@ class PaperExecutor(ExecutionAdapter):
         if order.ref_price <= 0:
             return Fill(order.symbol, order.side, 0, 0, 0, 0, 0, _now_iso(), "paper", False, "no price")
 
-        est_notional = order.notional_usd if order.side == "buy" else order.qty * order.ref_price
+        est_notional = order.notional_usd if order.notional_usd > 0 else order.qty * order.ref_price
         slip = model_slippage_bps(est_notional, order.liquidity_usd, cap_bps=cfg.slippage_bps_max)
         fee_bps_side = cfg.fee_bps_roundtrip / 2.0
 
         if order.side == "buy":
             price = order.ref_price * (1 + slip / 10_000.0)
-            notional = order.notional_usd
-            qty = notional / price if price > 0 else 0.0
+            if order.qty > 0:                       # qty-specified buy (e.g. covering a short)
+                qty = order.qty
+                notional = qty * price
+            else:
+                notional = order.notional_usd
+                qty = notional / price if price > 0 else 0.0
         else:  # sell
             price = order.ref_price * (1 - slip / 10_000.0)
             qty = order.qty

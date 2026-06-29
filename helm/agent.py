@@ -297,6 +297,7 @@ class Agent:
         if not posture.halt_new_risk and not self.sentinel.kill_switch_engaged():
             self._run_rotation(snap, prices, posture, actions, dry_run, now)
             self._run_entries(snap, prices, posture, actions, dry_run, now)
+            self._run_short_entries(snap, prices, posture, actions, dry_run, now)
         self._ensure_min_trade(now, snap, prices, posture, actions, dry_run)
 
         summary = self.portfolio.summary(prices)
@@ -325,14 +326,19 @@ class Agent:
             pos = self.portfolio.positions.get(ex.symbol)
             if not pos:
                 continue
+            is_short = pos.direction < 0
             dec = self.sentinel.pre_exit(symbol=ex.symbol, qty=ex.qty, held_qty=pos.qty)
             if not dec.approved:
                 continue
             if dry_run:
                 actions.append(Action("dry_run", ex.symbol, f"would exit ({ex.reason})"))
                 continue
-            order = Order(ex.symbol, "sell", ref_price=ex.ref_price, qty=ex.qty,
-                          liquidity_usd=1e9, reason=ex.reason)
+            # A short closes by BUYING back; a long by SELLING. reduce_only stops a
+            # perp close from ever flipping into a fresh opposite position.
+            side = "buy" if is_short else "sell"
+            order = Order(ex.symbol, side, ref_price=ex.ref_price, qty=ex.qty,
+                          notional_usd=(ex.qty * ex.ref_price if is_short else 0.0),
+                          liquidity_usd=1e9, reason=ex.reason, reduce_only=True)
             fill = self.executor.execute(order)
             if not fill.ok or fill.qty <= 0:
                 # Failed live exit: leave the position booked (it is still held
@@ -341,7 +347,8 @@ class Agent:
                                               "symbol": ex.symbol, "note": fill.note[:80]})
                 actions.append(Action("blocked", ex.symbol, f"exit unfilled: {fill.note[:60]}"))
                 continue
-            realized = self.portfolio.apply_sell(fill)
+            realized = (self.portfolio.apply_close(fill) if is_short
+                        else self.portfolio.apply_sell(fill))
             self.ledger.append("trade", {**asdict(fill), "reason": ex.reason,
                                           "realized_pnl": round(realized, 4)})
             actions.append(Action("exit", ex.symbol,
@@ -641,6 +648,7 @@ class Agent:
     def _flatten_position(self, sym, pos, prices, actions, dry_run) -> None:
         """Liquidate one whole position to USDT (the per-name leg of a 'cash out')."""
         ref = prices.get(sym, pos.avg_entry)
+        is_short = pos.direction < 0
         dec = self.sentinel.pre_exit(symbol=sym, qty=pos.qty, held_qty=pos.qty)
         if not dec.approved:
             actions.append(Action("blocked", sym, "flatten vetoed by sentinel"))
@@ -648,15 +656,18 @@ class Agent:
         if dry_run:
             actions.append(Action("dry_run", sym, f"would flatten all @ {ref:.4f}"))
             return
-        order = Order(sym, "sell", ref_price=ref, qty=pos.qty,
-                      liquidity_usd=1e9, reason="swing_flatten")
+        side = "buy" if is_short else "sell"
+        order = Order(sym, side, ref_price=ref, qty=pos.qty,
+                      notional_usd=(pos.qty * ref if is_short else 0.0),
+                      liquidity_usd=1e9, reason="swing_flatten", reduce_only=True)
         fill = self.executor.execute(order)
         if not fill.ok or fill.qty <= 0:
             self.ledger.append("alert", {"reason": "swing_flatten_unfilled",
                                           "symbol": sym, "note": fill.note[:80]})
             actions.append(Action("blocked", sym, f"flatten unfilled: {fill.note[:60]}"))
             return
-        realized = self.portfolio.apply_sell(fill)
+        realized = (self.portfolio.apply_close(fill) if is_short
+                    else self.portfolio.apply_sell(fill))
         self.ledger.append("trade", {**asdict(fill), "reason": "swing_flatten",
                                       "realized_pnl": round(realized, 4)})
         actions.append(Action("exit", sym,
@@ -842,7 +853,7 @@ class Agent:
         for sym, pos in list(p.positions.items()):
             if sym == swing_sym or is_stable(sym):   # harvester owns the swing name
                 continue
-            if pos.qty <= 0:
+            if pos.qty <= 0 or pos.direction < 0:    # trail-lock is a long-only profit bank
                 continue
             px = prices.get(sym)
             if not px or px <= 0:
@@ -866,7 +877,7 @@ class Agent:
         rc = self.settings.risk
         p = self.portfolio
         pos = p.positions.get(sym)
-        if pos is None or pos.qty <= 0:
+        if pos is None or pos.qty <= 0 or pos.direction < 0:
             return
         frac = self._harvest_param("HELM_HARVEST_FRAC", rc.harvest_trade_frac, 0.02, 0.90)
         units = pos.qty * frac
@@ -1090,6 +1101,8 @@ class Agent:
         for sym, pos in self.portfolio.positions.items():
             if sym in top_syms or sym == leader.symbol or sym == swing_block:
                 continue
+            if pos.direction < 0:                 # rotation recycles longs only
+                continue
             held_val = pos.qty * prices.get(sym, pos.avg_entry)
             if held_val < rc.rotation_min_stale_usd:
                 continue
@@ -1129,6 +1142,8 @@ class Agent:
             best_excess = 0.0
             for sym, pos in self.portfolio.positions.items():
                 if sym == leader.symbol or sym not in orig_top_syms:
+                    continue
+                if pos.direction < 0:             # never trim a short to fund a long
                     continue
                 held_val = pos.qty * prices.get(sym, pos.avg_entry)
                 excess = held_val - target_each
@@ -1279,6 +1294,100 @@ class Agent:
                                           "tp": round(plan.take_profit_price, 6)})
             actions.append(Action("entry", sig.symbol,
                                   f"buy ${fill.notional_usd:.2f} @ {fill.price:.4f}"))
+
+    # ----------------------------------------------- short entries (perps)
+    def _run_short_entries(self, snap: SignalSnapshot, prices, posture, actions, dry_run, now) -> None:
+        """Open shorts on the weakest down-trending names (perps long/short mode).
+
+        Mirror image of ``_run_entries``: identical sizing, Sentinel gate, gross-cap
+        and cash-margin headroom — but it SELLS to OPEN (direction = -1) the most
+        negative-composite names that are genuinely falling (the engine's
+        ``ranked_short`` already applied the symmetric quality + downside-drift cost
+        gates). OFF unless ``execution.long_short_enabled`` and a swap market; shorts
+        add risk, so the caller only runs this inside the halt / kill-switch gate.
+        """
+        ex = self.settings.execution
+        if not (ex.long_short_enabled and ex.market_type == "swap"):
+            return
+        if self.portfolio.swing_flat:
+            return
+        s = self.settings
+        max_shorts = max(0, int(ex.max_shorts))
+        open_shorts = sum(1 for pp in self.portfolio.positions.values() if pp.direction < 0)
+        if max_shorts <= 0 or open_shorts >= max_shorts:
+            return
+        equity = self.portfolio.equity(prices)
+        gross_cap_usd = posture.max_gross_pct * equity
+        start_gross = self.portfolio.gross_usd(prices)
+        consumed = 0.0
+        reserve = 0.01 * gross_cap_usd
+        for sig in snap.shorts(max(s.signals.top_n, max_shorts)):
+            if open_shorts >= max_shorts:
+                break
+            if is_stable(sig.symbol) or sig.symbol in self.portfolio.positions:
+                continue                            # no stables; one position per name
+            headroom = gross_cap_usd - start_gross - consumed - reserve
+            cash_on_hand = self.portfolio.cash - (consumed if dry_run else 0.0)
+            headroom = min(headroom, cash_on_hand - max(reserve, s.risk.gas_usd_per_swap))
+            if headroom < s.contest.dust_floor_usd:
+                break
+            plan = plan_position(
+                symbol=sig.symbol, price=sig.price, atr=sig.atr, equity=equity,
+                per_trade_risk_pct=posture.per_trade_risk_pct,
+                stop_atr_mult=s.risk.stop_loss_atr_mult,
+                take_profit_atr_mult=s.risk.take_profit_atr_mult,
+                max_position_pct=s.risk.max_position_pct,
+                gross_headroom_usd=headroom,
+                realized_vol_annual=sig.realized_vol_annual,
+                target_vol_annual=s.risk.target_portfolio_vol_annual,
+                direction=-1,
+            )
+            if not plan.ok:
+                continue
+            est_slip = model_slippage_bps(plan.notional_usd, sig.liquidity_usd,
+                                          cap_bps=s.risk.slippage_bps_max)
+            book = self.portfolio.book_state(prices, sig.symbol)
+            dec = self.sentinel.pre_trade(
+                symbol=sig.symbol, plan=plan, book=book, posture=posture,
+                liquidity_usd=sig.liquidity_usd, est_slippage_bps=est_slip,
+                security=None,
+            )
+            self.ledger.append("risk", {
+                "symbol": sig.symbol, "approved": dec.approved, "side": "short",
+                "notional": round(plan.notional_usd, 2),
+                "binding": plan.binding_constraint, "failed": dec.failed_checks,
+            })
+            if not dec.approved:
+                actions.append(Action("blocked", sig.symbol, f"short: {dec.reason[:70]}"))
+                continue
+            if dry_run:
+                actions.append(Action("dry_run", sig.symbol,
+                                      f"would short ${plan.notional_usd:.2f} ({plan.binding_constraint})"))
+                consumed += plan.notional_usd
+                open_shorts += 1
+                continue
+            qty = plan.notional_usd / sig.price if sig.price > 0 else 0.0
+            if qty <= 0:
+                continue
+            order = Order(sig.symbol, "sell", ref_price=sig.price, qty=qty,
+                          notional_usd=plan.notional_usd, liquidity_usd=sig.liquidity_usd,
+                          reason="short_entry", reduce_only=False)
+            fill = self.executor.execute(order)
+            if not fill.ok or fill.qty <= 0:
+                self.ledger.append("alert", {"reason": "short_entry_unfilled",
+                                              "symbol": sig.symbol, "note": fill.note[:80]})
+                actions.append(Action("blocked", sig.symbol, f"short unfilled: {fill.note[:60]}"))
+                continue
+            self.portfolio.apply_open(fill, -1, plan.stop_price, plan.take_profit_price,
+                                      plan.stop_distance)
+            consumed += fill.notional_usd
+            open_shorts += 1
+            self.ledger.append("trade", {**asdict(fill), "reason": "short_entry",
+                                          "direction": -1,
+                                          "stop": round(plan.stop_price, 6),
+                                          "tp": round(plan.take_profit_price, 6)})
+            actions.append(Action("short", sig.symbol,
+                                  f"sell-open ${fill.notional_usd:.2f} @ {fill.price:.4f}"))
 
     # ------------------------------------------------- min daily trade floor
     def _ensure_min_trade(self, now, snap, prices, posture, actions, dry_run) -> None:

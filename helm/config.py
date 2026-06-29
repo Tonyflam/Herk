@@ -258,6 +258,12 @@ class ExecutionCfg:
     # max_leverage is the hard ceiling the agent can never exceed (you set it).
     leverage_enabled: bool = False
     max_leverage: float = 1.0
+    # --- OMEGA: long/short perps ---------------------------------------------
+    # When True (and market_type == "swap"), the agent may OPEN shorts on the
+    # weakest down-trending names in addition to longs on the strongest. Off by
+    # default so the spot / long-only path and the contest behavior are unchanged.
+    long_short_enabled: bool = False
+    max_shorts: int = 3
 
 
 @dataclass
@@ -506,4 +512,31 @@ def load_settings(path: str | Path | None = None) -> Settings:
         # Set HELM_QUOTE_ONLY=0 at arming so live swaps actually broadcast.
         s.execution.quote_only_dry_run = _env_bool(
             "HELM_QUOTE_ONLY", s.execution.quote_only_dry_run)
+    # --- OMEGA ccxt / perps env overrides (settings.yaml otherwise) ----------
+    if os.getenv("HELM_EXCHANGE"):
+        s.execution.exchange = os.environ["HELM_EXCHANGE"].strip().lower()
+    if os.getenv("HELM_MARKET_TYPE"):
+        s.execution.market_type = os.environ["HELM_MARKET_TYPE"].strip().lower()
+    if os.getenv("HELM_QUOTE_CCY"):
+        s.execution.quote_currency = os.environ["HELM_QUOTE_CCY"].strip().upper()
+    if os.getenv("HELM_TESTNET") is not None:
+        s.execution.testnet = _env_bool("HELM_TESTNET", s.execution.testnet)
+    if os.getenv("HELM_LEVERAGE_ENABLED") is not None:
+        s.execution.leverage_enabled = _env_bool(
+            "HELM_LEVERAGE_ENABLED", s.execution.leverage_enabled)
+    if os.getenv("HELM_MAX_LEVERAGE"):
+        try:
+            s.execution.max_leverage = max(1.0, float(os.environ["HELM_MAX_LEVERAGE"]))
+        except ValueError:
+            pass
+    if os.getenv("HELM_LONG_SHORT") is not None:
+        s.execution.long_short_enabled = _env_bool(
+            "HELM_LONG_SHORT", s.execution.long_short_enabled)
+    if os.getenv("HELM_MAX_SHORTS"):
+        try:
+            s.execution.max_shorts = max(0, int(os.environ["HELM_MAX_SHORTS"]))
+        except ValueError:
+            pass
+    if os.getenv("HELM_FULL_MARKET") is not None:
+        s.universe.full_market = _env_bool("HELM_FULL_MARKET", s.universe.full_market)
     return s

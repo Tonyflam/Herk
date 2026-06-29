@@ -53,6 +53,7 @@ def plan_position(
     gross_headroom_usd: float,
     realized_vol_annual: float | None = None,
     target_vol_annual: float | None = None,
+    direction: int = 1,
 ) -> SizePlan:
     if price <= 0 or equity <= 0:
         return SizePlan(symbol, price, atr, 0, 0, 0, 0, 0, 0, 0, "invalid", "price/equity<=0")
@@ -89,8 +90,13 @@ def plan_position(
 
     qty = notional / price
     atr_for_levels = atr if atr > 0 else price * _FALLBACK_STOP_PCT / max(stop_atr_mult, 1e-9)
-    stop_price = price - stop_distance
-    take_profit_price = price + atr_for_levels * take_profit_atr_mult
+    if direction >= 0:
+        stop_price = price - stop_distance
+        take_profit_price = price + atr_for_levels * take_profit_atr_mult
+    else:
+        # Short: stop ABOVE entry, take-profit BELOW entry.
+        stop_price = price + stop_distance
+        take_profit_price = max(0.0, price - atr_for_levels * take_profit_atr_mult)
 
     return SizePlan(
         symbol=symbol,

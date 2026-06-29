@@ -154,16 +154,27 @@ class CcxtAdapter(ExecutionAdapter):
         # Leverage (perps only) — always clamped to the hard ceiling.
         self._apply_leverage(market)
 
-        # Size: market BUY by base amount (notional/ref); SELL by held qty.
-        if order.side == "buy":
-            amount = order.notional_usd / order.ref_price
-        else:
-            amount = order.qty
+        # Size: prefer an explicit base qty when present (closes, shorts, spot
+        # sells); otherwise derive it from notional/ref (a long OPEN sized in USD).
+        # This single rule is correct for all four open/close legs:
+        #   long open  = buy,  qty=0  -> notional/ref
+        #   long close = sell, qty>0  -> qty   (reduce_only)
+        #   short open = sell, qty>0  -> qty
+        #   short close= buy,  qty>0  -> qty   (reduce_only)
+        amount = order.qty if order.qty > 0 else (order.notional_usd / order.ref_price)
         if amount <= 0:
             return fail("zero amount")
 
+        # reduceOnly on perps guarantees a close can never accidentally flip into
+        # a fresh opposite position if the book and the venue disagree on size.
+        params: dict = {}
+        if order.reduce_only and self.market_type == "swap":
+            params["reduceOnly"] = True
+
         try:
-            res = self._client.create_order(market, "market", order.side, amount)
+            res = self._client.create_order(
+                market, "market", order.side, amount, params=params
+            )
         except Exception as e:
             return fail(self._sanitize(str(e)))
 

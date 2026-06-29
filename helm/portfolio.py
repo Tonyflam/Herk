@@ -19,7 +19,7 @@ from .risk.sentinel import BookState
 @dataclass
 class Position:
     symbol: str
-    qty: float
+    qty: float                  # always POSITIVE size; the sign lives in `direction`
     avg_entry: float
     stop_price: float
     take_profit_price: float
@@ -30,10 +30,33 @@ class Position:
     # last trail-lock slice was banked. Lets the guard fire once per FRESH high
     # rather than every cycle while price sits below the give-back band.
     trail_anchor: float = 0.0
+    direction: int = 1          # +1 = long, -1 = short (perps). Defaults long for back-compat.
+    lowest_price: float = 0.0   # running trough since entry (shorts trail off this); 0 = unset
 
     def trailing_stop(self) -> float:
-        """Trailing stop = the higher of the fixed stop and (peak − stop_dist)."""
-        return max(self.stop_price, self.highest_price - self.stop_distance)
+        """Direction-aware trailing stop.
+
+        Long: the higher of the fixed stop and (peak − stop_dist) — ratchets up.
+        Short: the lower of the fixed stop and (trough + stop_dist) — ratchets down.
+        """
+        if self.direction >= 0:
+            return max(self.stop_price, self.highest_price - self.stop_distance)
+        trough = self.lowest_price if self.lowest_price > 0 else self.avg_entry
+        return min(self.stop_price, trough + self.stop_distance)
+
+    def mark_value(self, price: float) -> float:
+        """USD the position contributes to equity if closed at `price`.
+
+        Long: qty·price. Short: reserved margin + short P&L = qty·(2·entry − price),
+        so equity rises as a short moves favorably (price down) and reduces to the
+        long formula exactly when direction = +1.
+        """
+        if self.direction >= 0:
+            return self.qty * price
+        return self.qty * (2.0 * self.avg_entry - price)
+
+    def unrealized_pnl(self, price: float) -> float:
+        return self.direction * (price - self.avg_entry) * self.qty
 
 
 @dataclass
@@ -76,13 +99,14 @@ class Portfolio:
 
     # ------------------------------------------------------------ marking
     def position_value(self, prices: dict[str, float]) -> float:
-        return sum(p.qty * prices.get(s, p.avg_entry) for s, p in self.positions.items())
+        return sum(p.mark_value(prices.get(s, p.avg_entry)) for s, p in self.positions.items())
 
     def equity(self, prices: dict[str, float]) -> float:
         return self.cash + self.position_value(prices)
 
     def gross_usd(self, prices: dict[str, float]) -> float:
-        return self.position_value(prices)
+        # True exposure magnitude (|notional|) regardless of side — qty is positive.
+        return sum(p.qty * prices.get(s, p.avg_entry) for s, p in self.positions.items())
 
     def update_marks(self, prices: dict[str, float]) -> None:
         eq = self.equity(prices)
@@ -90,6 +114,7 @@ class Portfolio:
         for s, pos in self.positions.items():
             px = prices.get(s, pos.avg_entry)
             pos.highest_price = max(pos.highest_price, px)
+            pos.lowest_price = px if pos.lowest_price <= 0 else min(pos.lowest_price, px)
 
     def roll_day(self, now: datetime, prices: dict[str, float]) -> None:
         today = now.date()
@@ -126,6 +151,72 @@ class Portfolio:
                 stop_distance=stop_distance, highest_price=fill.price, entry_ts=fill.ts,
             )
 
+    def apply_open(self, fill: Fill, direction: int, stop_price: float,
+                   take_profit_price: float, stop_distance: float) -> None:
+        """Open or add to a position in `direction` (+1 long / -1 short).
+
+        Reserves the full notional as margin from cash (1x-equivalent bookkeeping),
+        identical to ``apply_buy`` when direction = +1. Perp long AND short entries
+        route here so the accounting stays symmetric.
+        """
+        cost = fill.notional_usd + fill.fee_usd + fill.gas_usd
+        self.cash -= cost
+        self.fees_paid += fill.fee_usd
+        self.gas_paid += fill.gas_usd
+        self.trades_today += 1
+        self.total_trades += 1
+        d = 1 if direction >= 0 else -1
+        existing = self.positions.get(fill.symbol)
+        if existing and existing.direction == d:
+            new_qty = existing.qty + fill.qty
+            existing.avg_entry = (
+                (existing.avg_entry * existing.qty + fill.price * fill.qty) / new_qty
+                if new_qty > 0 else fill.price
+            )
+            existing.qty = new_qty
+            existing.stop_price = stop_price
+            existing.take_profit_price = take_profit_price
+            existing.stop_distance = stop_distance
+            existing.highest_price = max(existing.highest_price, fill.price)
+            existing.lowest_price = (fill.price if existing.lowest_price <= 0
+                                     else min(existing.lowest_price, fill.price))
+        else:
+            self.positions[fill.symbol] = Position(
+                symbol=fill.symbol, qty=fill.qty, avg_entry=fill.price,
+                stop_price=stop_price, take_profit_price=take_profit_price,
+                stop_distance=stop_distance, highest_price=fill.price, entry_ts=fill.ts,
+                direction=d, lowest_price=fill.price,
+            )
+
+    def apply_close(self, fill: Fill) -> float:
+        """Close / reduce the existing position by ``fill.qty``; returns realized P&L.
+
+        Direction-aware: returns reserved margin + signed P&L to cash. Reduces to
+        ``apply_sell`` exactly for a long (direction = +1).
+        """
+        pos = self.positions.get(fill.symbol)
+        if not pos:
+            # Stray close with nothing on the book: mirror legacy apply_sell cash-in.
+            self.cash += fill.notional_usd - fill.fee_usd - fill.gas_usd
+            self.fees_paid += fill.fee_usd
+            self.gas_paid += fill.gas_usd
+            self.trades_today += 1
+            self.total_trades += 1
+            return 0.0
+        close_qty = min(fill.qty, pos.qty)
+        gross = pos.direction * (fill.price - pos.avg_entry) * close_qty
+        self.cash += close_qty * pos.avg_entry + gross - fill.fee_usd - fill.gas_usd
+        realized = gross - fill.fee_usd - fill.gas_usd
+        self.realized_pnl += realized
+        self.fees_paid += fill.fee_usd
+        self.gas_paid += fill.gas_usd
+        self.trades_today += 1
+        self.total_trades += 1
+        pos.qty -= close_qty
+        if pos.qty <= 1e-12:
+            del self.positions[fill.symbol]
+        return realized
+
     def apply_sell(self, fill: Fill) -> float:
         """Apply a sell fill; returns realized P&L for the closed quantity."""
         pos = self.positions.get(fill.symbol)
@@ -150,12 +241,21 @@ class Portfolio:
             px = prices.get(s)
             if px is None or px <= 0:
                 continue
-            if px <= pos.stop_price:
-                out.append(ExitSignal(s, pos.qty, "stop", px))
-            elif px >= pos.take_profit_price:
-                out.append(ExitSignal(s, pos.qty, "take_profit", px))
-            elif trailing and px <= pos.trailing_stop():
-                out.append(ExitSignal(s, pos.qty, "trailing_stop", px))
+            if pos.direction >= 0:
+                if px <= pos.stop_price:
+                    out.append(ExitSignal(s, pos.qty, "stop", px))
+                elif px >= pos.take_profit_price:
+                    out.append(ExitSignal(s, pos.qty, "take_profit", px))
+                elif trailing and px <= pos.trailing_stop():
+                    out.append(ExitSignal(s, pos.qty, "trailing_stop", px))
+            else:
+                # Short: loss is UP, profit is DOWN — mirror every threshold.
+                if px >= pos.stop_price:
+                    out.append(ExitSignal(s, pos.qty, "stop", px))
+                elif px <= pos.take_profit_price:
+                    out.append(ExitSignal(s, pos.qty, "take_profit", px))
+                elif trailing and px >= pos.trailing_stop():
+                    out.append(ExitSignal(s, pos.qty, "trailing_stop", px))
         return out
 
     # --------------------------------------------------------------- views
