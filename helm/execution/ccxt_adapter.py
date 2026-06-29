@@ -128,6 +128,59 @@ class CcxtAdapter(ExecutionAdapter):
             pass  # venue may reject / no-op; sizing already assumes <= cap
         return lev
 
+    # -------------------------------------------------------- universe discovery
+    def perp_ticker_rows(self) -> list[dict]:
+        """Synthetic 24h-ticker rows for every active linear ``{quote}`` perp the
+        venue lists, shaped as ``{"symbol": base+quote, "quoteVolume": usd}`` so
+        the caller can feed them straight into ``rank_full_market``. This binds
+        the tradeable universe to the EXACT venue that will route the orders, so
+        the engine can never top-rank a name that isn't actually listed as a
+        USDT-margined perp here. Returns an empty list on any failure (the caller
+        falls back to the curated book — the agent is never left blind). Only
+        meaningful for ``market_type == 'swap'``.
+        """
+        if self._client is None or self.market_type != "swap":
+            return []
+        try:
+            if not self._markets_loaded:
+                self._client.load_markets()
+                self._markets_loaded = True
+            markets = getattr(self._client, "markets", None) or {}
+            tickers = self._client.fetch_tickers()
+        except Exception:
+            return []
+        q = self.quote
+        rows: list[dict] = []
+        for sym, m in markets.items():
+            try:
+                if not isinstance(m, dict):
+                    continue
+                if not (m.get("swap") and m.get("linear")):
+                    continue
+                if m.get("active") is False:
+                    continue
+                if str(m.get("quote", "")).upper() != q:
+                    continue
+                settle = str(m.get("settle", q) or q).upper()
+                if settle != q:
+                    continue
+                base = str(m.get("base", "")).upper()
+                if not base:
+                    continue
+                t = tickers.get(sym) or {}
+                vol = t.get("quoteVolume")
+                if not vol:
+                    bv = t.get("baseVolume")
+                    last = t.get("last") or t.get("close")
+                    try:
+                        vol = float(bv) * float(last) if (bv and last) else 0.0
+                    except (TypeError, ValueError):
+                        vol = 0.0
+                rows.append({"symbol": f"{base}{q}", "quoteVolume": float(vol or 0.0)})
+            except Exception:
+                continue
+        return rows
+
     # ----------------------------------------------------------------- execute
     def execute(self, order: Order) -> Fill:
         def fail(note: str) -> Fill:

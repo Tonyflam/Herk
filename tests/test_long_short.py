@@ -28,6 +28,7 @@ from helm.execution.ccxt_adapter import CcxtAdapter
 from helm.portfolio import Portfolio
 from helm.risk.sizing import plan_position
 from helm.signals.engine import SignalSnapshot, SymbolSignal
+from helm.universe import rank_full_market
 
 _NOW = datetime(2026, 6, 25, 12, 0, tzinfo=timezone.utc)
 
@@ -201,6 +202,75 @@ def test_ccxt_spot_never_flags_reduceonly():
     a = CcxtAdapter(_ccxt_settings("spot"), client=fake)
     a.execute(Order("AAVE", "sell", ref_price=100.0, qty=1.0, reduce_only=True))
     assert "reduceOnly" not in fake.calls[0]["params"]         # perps-only flag
+
+
+# ------------------------------------------------- venue universe discovery
+class _FakeVenue:
+    """Fake ccxt client exposing markets + tickers for universe discovery."""
+
+    def __init__(self, markets: dict, tickers: dict):
+        self.markets: dict = {}
+        self._markets = markets
+        self._tickers = tickers
+
+    def load_markets(self):
+        self.markets = self._markets
+        return self._markets
+
+    def fetch_tickers(self):
+        return self._tickers
+
+    def set_sandbox_mode(self, on):
+        pass
+
+
+def _discovery_venue() -> _FakeVenue:
+    markets = {
+        "BTC/USDT:USDT": {"swap": True, "linear": True, "active": True,
+                          "quote": "USDT", "settle": "USDT", "base": "BTC"},
+        "ETH/USDT:USDT": {"swap": True, "linear": True, "active": True,
+                          "quote": "USDT", "settle": "USDT", "base": "ETH"},
+        "INJ/USDT:USDT": {"swap": True, "linear": True, "active": True,
+                          "quote": "USDT", "settle": "USDT", "base": "INJ"},
+        "DOGE/USDT:USDT": {"swap": True, "linear": True, "active": False,
+                           "quote": "USDT", "settle": "USDT", "base": "DOGE"},
+        "BTC/USD:BTC": {"swap": True, "linear": False, "inverse": True,
+                        "active": True, "quote": "USD", "settle": "BTC", "base": "BTC"},
+        "SOL/USDT": {"swap": False, "spot": True, "active": True,
+                     "quote": "USDT", "base": "SOL"},
+        "USDC/USDT:USDT": {"swap": True, "linear": True, "active": True,
+                           "quote": "USDT", "settle": "USDT", "base": "USDC"},
+    }
+    tickers = {
+        "BTC/USDT:USDT": {"quoteVolume": 9e9},
+        "ETH/USDT:USDT": {"quoteVolume": 5e9},
+        "INJ/USDT:USDT": {"baseVolume": 1e6, "last": 200.0},   # derived = 2e8
+        "USDC/USDT:USDT": {"quoteVolume": 1e9},
+    }
+    return _FakeVenue(markets, tickers)
+
+
+def test_perp_ticker_rows_only_active_linear_usdt_perps():
+    a = CcxtAdapter(_ccxt_settings("swap"), client=_discovery_venue())
+    rows = a.perp_ticker_rows()
+    syms = {r["symbol"] for r in rows}
+    # inactive (DOGE), inverse (BTC/USD), and spot (SOL) are all excluded
+    assert syms == {"BTCUSDT", "ETHUSDT", "INJUSDT", "USDCUSDT"}
+    inj = next(r for r in rows if r["symbol"] == "INJUSDT")
+    assert inj["quoteVolume"] == pytest.approx(2e8)            # baseVolume*last fallback
+
+
+def test_perp_rows_feed_rank_full_market_drops_stable_and_sorts():
+    a = CcxtAdapter(_ccxt_settings("swap"), client=_discovery_venue())
+    ranked = rank_full_market(a.perp_ticker_rows(), quote="USDT",
+                              top_n=10, min_vol_usd=5e6)
+    assert ranked[:3] == ["BTC", "ETH", "INJ"]                 # by 24h volume desc
+    assert "USDC" not in ranked                               # stable base dropped
+
+
+def test_perp_ticker_rows_empty_for_spot_market():
+    a = CcxtAdapter(_ccxt_settings("spot"), client=_discovery_venue())
+    assert a.perp_ticker_rows() == []                         # perps-only discovery
 
 
 # ------------------------------------------------------- agent integration

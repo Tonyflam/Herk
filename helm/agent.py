@@ -100,7 +100,22 @@ class Agent:
         try:
             from .data.sources import fetch_24h_tickers
             from .universe import rank_full_market
-            tickers = fetch_24h_tickers()
+
+            # When trading perps through ccxt, discover the universe from the
+            # SAME venue that will route the orders so every ranked name is a
+            # live, active USDT-margined perp here (not a Binance-spot-only
+            # name the perp venue never listed). Fall back to the keyless
+            # Binance 24h feed for spot / paper.
+            tickers: list[dict] = []
+            ex = s.execution
+            if (
+                (ex.adapter or "").strip().lower() == "ccxt"
+                and (ex.market_type or "").strip().lower() == "swap"
+                and hasattr(self.executor, "perp_ticker_rows")
+            ):
+                tickers = self.executor.perp_ticker_rows()
+            if not tickers:
+                tickers = fetch_24h_tickers()
             return rank_full_market(
                 tickers,
                 quote=s.execution.quote_currency,
