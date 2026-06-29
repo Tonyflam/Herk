@@ -179,6 +179,11 @@ profiles:
       daily_loss_limit_pct: 15.0          # don't freeze on a normal red day
       per_trade_risk_pct: 3.5             # high conviction per entry
       take_profit_atr_mult: 6.0           # let winners run
+      # --- active-management toggles (diversified, no single-name harvester) ---
+      rotation_rebalance_enabled: true    # rebalance the 2-name book: trim strength to seed the stronger leader
+      harvest_trail_giveback_pct: 0.03    # trail-guard: bank a slice of EVERY held name on a 3% giveback from a fresh peak (sell-only)
+      swing_enabled: true                 # keep manual override levers (sellall / buy#N / off#N) available for personal use
+      swing_symbol: FET                   # manual-control + flatten target; re-point to whatever you want to hand-manage
     signals:
       min_composite_score: 0.10           # stay invested on thinner edge
       top_n: 2                            # concentrated but diversified enough to survive a single-name blowup
