@@ -85,6 +85,9 @@ class Agent:
         if self.settings.execution.adapter == "twak":
             from .execution.twak import TwakAdapter
             return TwakAdapter(self.settings)
+        if self.settings.execution.adapter == "ccxt":
+            from .execution.ccxt_adapter import CcxtAdapter
+            return CcxtAdapter(self.settings)
         return PaperExecutor(self.settings)
 
     # ----------------------------------------------------------- persistence

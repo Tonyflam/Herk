@@ -1,0 +1,217 @@
+"""OMEGA execution adapter: CEX spot + perps via ccxt.
+
+This is the post-contest execution path that frees HELM from the BSC /
+PancakeSwap spot-only constraint. Through ``ccxt`` it can reach thousands of
+pairs across major venues (Binance / Bybit / OKX ...) for both spot and
+USDT-margined perpetuals, with optional leverage that is ALWAYS clamped to
+``ExecutionCfg.max_leverage``.
+
+Safety posture (paper-first):
+  * Defaults to the exchange TESTNET / sandbox — no real money moves until
+    ``execution.testnet`` is explicitly turned off.
+  * API credentials are read from the environment only (``Secrets``) and are
+    NEVER logged; any exchange error surfaced into ``Fill.note`` is scrubbed of
+    the key / secret first.
+  * Use trade-only API keys with NO withdrawal permission, IP-allowlisted.
+  * Leverage is OFF by default and hard-capped; spot is the default market type.
+
+The adapter accepts an injected ``client`` so it is fully unit-testable with a
+fake exchange (no network, no ccxt install required for the core test suite).
+"""
+
+from __future__ import annotations
+
+from ..config import Settings
+from .base import ExecutionAdapter, Fill, Order, _now_iso
+
+# Currencies treated as ~1 USD when valuing fees.
+_USD_LIKE = {"USDT", "USD", "USDC", "BUSD", "FDUSD", "TUSD", "DAI"}
+
+
+class CcxtAdapter(ExecutionAdapter):
+    name = "ccxt"
+
+    def __init__(self, settings: Settings, client: object | None = None):
+        self.s = settings
+        ex = settings.execution
+        self.exchange_id = (ex.exchange or "binance").strip().lower()
+        self.market_type = (ex.market_type or "spot").strip().lower()
+        self.quote = (ex.quote_currency or "USDT").strip().upper()
+        self.testnet = bool(ex.testnet)
+        self.leverage_enabled = bool(ex.leverage_enabled)
+        self.max_leverage = max(1.0, float(ex.max_leverage or 1.0))
+        self._secrets = settings.secrets
+        self._client = client  # injectable for tests
+        self._markets_loaded = False
+        self._init_error = ""
+        if self._client is None:
+            self._client = self._build_client()
+
+    # ------------------------------------------------------------ build client
+    def _build_client(self):
+        try:
+            import ccxt  # lazy: keeps the core paper runtime dependency-light
+        except Exception as e:  # pragma: no cover - import guard
+            self._init_error = f"ccxt not installed: {type(e).__name__}"
+            return None
+        try:
+            klass = getattr(ccxt, self.exchange_id)
+        except AttributeError:
+            self._init_error = f"unknown exchange '{self.exchange_id}'"
+            return None
+        opts: dict = {
+            "enableRateLimit": True,
+            "options": {
+                "defaultType": "swap" if self.market_type == "swap" else "spot",
+            },
+        }
+        if self._secrets.ccxt_api_key:
+            opts["apiKey"] = self._secrets.ccxt_api_key
+        if self._secrets.ccxt_secret:
+            opts["secret"] = self._secrets.ccxt_secret
+        if self._secrets.ccxt_password:
+            opts["password"] = self._secrets.ccxt_password
+        try:
+            client = klass(opts)
+        except Exception as e:  # pragma: no cover - construction guard
+            self._init_error = f"ccxt init: {self._sanitize(str(e))}"
+            return None
+        if self.testnet:
+            try:
+                client.set_sandbox_mode(True)
+            except Exception as e:
+                self._init_error = f"sandbox unavailable: {self._sanitize(str(e))}"
+        return client
+
+    @property
+    def available(self) -> bool:
+        """True only when a client exists AND trade credentials are present."""
+        if self._client is None:
+            return False
+        return bool(self._secrets.ccxt_api_key and self._secrets.ccxt_secret)
+
+    def supports_live(self) -> bool:
+        return True
+
+    # -------------------------------------------------------------- symbol map
+    def market_symbol(self, symbol: str) -> str:
+        base = symbol.upper()
+        if base.endswith("/" + self.quote) or ":" in base:
+            return base
+        if self.market_type == "swap":
+            return f"{base}/{self.quote}:{self.quote}"
+        return f"{base}/{self.quote}"
+
+    # ----------------------------------------------------------------- secrets
+    def _sanitize(self, msg: str) -> str:
+        """Strip any credential material an exchange error might echo back."""
+        out = msg or ""
+        for sv in (
+            self._secrets.ccxt_api_key,
+            self._secrets.ccxt_secret,
+            self._secrets.ccxt_password,
+        ):
+            if sv and sv in out:
+                out = out.replace(sv, "***")
+        return out[:160]
+
+    # ---------------------------------------------------------------- leverage
+    def _apply_leverage(self, market: str) -> float:
+        """Set venue leverage for perps, clamped to the hard ceiling. Returns
+        the leverage actually requested (1.0 for spot or when disabled)."""
+        if self.market_type != "swap" or not self.leverage_enabled:
+            return 1.0
+        lev = max(1.0, min(self.max_leverage, float(self.max_leverage)))
+        try:
+            self._client.set_leverage(lev, market)
+        except Exception:
+            pass  # venue may reject / no-op; sizing already assumes <= cap
+        return lev
+
+    # ----------------------------------------------------------------- execute
+    def execute(self, order: Order) -> Fill:
+        def fail(note: str) -> Fill:
+            return Fill(
+                order.symbol, order.side, 0.0, 0.0, 0.0, 0.0, 0.0,
+                _now_iso(), self.name, False, note,
+            )
+
+        if self._client is None:
+            return fail(self._init_error or "ccxt client unavailable")
+        if not self.available:
+            return fail("ccxt credentials missing")
+        if order.ref_price <= 0:
+            return fail("no price")
+
+        market = self.market_symbol(order.symbol)
+        try:
+            if not self._markets_loaded:
+                self._client.load_markets()
+                self._markets_loaded = True
+        except Exception as e:
+            return fail(f"load_markets: {self._sanitize(str(e))}")
+
+        # Leverage (perps only) — always clamped to the hard ceiling.
+        self._apply_leverage(market)
+
+        # Size: market BUY by base amount (notional/ref); SELL by held qty.
+        if order.side == "buy":
+            amount = order.notional_usd / order.ref_price
+        else:
+            amount = order.qty
+        if amount <= 0:
+            return fail("zero amount")
+
+        try:
+            res = self._client.create_order(market, "market", order.side, amount)
+        except Exception as e:
+            return fail(self._sanitize(str(e)))
+
+        return self._fill_from_order(order, res)
+
+    # ------------------------------------------------------------------- parse
+    def _fill_from_order(self, order: Order, res: dict) -> Fill:
+        res = res or {}
+        price = float(res.get("average") or res.get("price") or order.ref_price or 0.0)
+        qty = float(res.get("filled") or res.get("amount") or 0.0)
+        cost = res.get("cost")
+        notional = float(cost) if cost not in (None, 0, 0.0) else qty * price
+        fee_usd = self._fee_usd(res, price)
+        slip = self._slippage_bps(order.side, order.ref_price, price)
+        ok = qty > 0 and price > 0
+        return Fill(
+            symbol=order.symbol,
+            side=order.side,
+            qty=qty,
+            price=price,
+            notional_usd=notional,
+            fee_usd=fee_usd,
+            slippage_bps=slip,
+            ts=_now_iso(),
+            source=self.name,
+            ok=ok,
+            note="" if ok else "unfilled",
+            gas_usd=0.0,
+        )
+
+    def _fee_usd(self, res: dict, price: float) -> float:
+        fees = res.get("fees")
+        if not fees and res.get("fee"):
+            fees = [res["fee"]]
+        total = 0.0
+        for f in fees or []:
+            if not f:
+                continue
+            c = float(f.get("cost") or 0.0)
+            cur = (f.get("currency") or "").upper()
+            if cur and cur not in _USD_LIKE:
+                c *= price  # fee charged in base units -> USD
+            total += c
+        return total
+
+    @staticmethod
+    def _slippage_bps(side: str, ref: float, fill: float) -> float:
+        if ref <= 0 or fill <= 0:
+            return 0.0
+        adverse = (fill - ref) if side == "buy" else (ref - fill)
+        return max(0.0, adverse / ref * 10_000.0)

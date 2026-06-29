@@ -6,3 +6,6 @@
 bnbagent>=0.3.6        # BNB AI Agent SDK — ERC-8004 identity + X402Signer (EIP-712 local signing)
 web3>=6.15             # BSC RPC reads (verify registration, balances, tx receipts)
 eth-account>=0.11      # local key handling for x402 signing fallbacks
+
+# OMEGA — CEX spot + perps venue (unified API across Binance/Bybit/OKX/...).
+ccxt>=4.3              # spot & USDT-margined perpetuals, testnet sandbox, leverage

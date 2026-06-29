@@ -219,6 +219,13 @@ class UniverseCfg:
     use_curated_tradeable: bool = True
     extra_tradeable: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
+    # --- OMEGA: full-market discovery (post-contest, venue-wide) --------------
+    # When True, the tradeable book is discovered from the live venue's whole
+    # market (thousands of pairs) ranked by 24h quote volume, instead of the
+    # fixed contest ELIGIBLE list. Off by default -> contest behavior preserved.
+    full_market: bool = False
+    full_market_top_n: int = 60
+    full_market_min_vol_usd: float = 5_000_000.0
 
 
 @dataclass
@@ -239,6 +246,18 @@ class ExecutionCfg:
     # built-in registry (helm/data/onchain.py) covers the high-confidence cash
     # leg + blue chips; supply the rest here (authoritative, e.g. from TWAK).
     token_addresses: dict = field(default_factory=dict)
+    # --- OMEGA: ccxt / CEX venue (spot + USD-M perps) ------------------------
+    # Active when adapter == "ccxt". exchange = any ccxt id (binance/bybit/okx).
+    # market_type: "spot" or "swap" (USDT-margined perpetual). testnet keeps us
+    # on the exchange sandbox (paper-first) until explicitly flipped off.
+    exchange: str = "binance"
+    market_type: str = "spot"
+    quote_currency: str = "USDT"
+    testnet: bool = True
+    # Leverage stays OFF until enabled, and is ALWAYS clamped to max_leverage.
+    # max_leverage is the hard ceiling the agent can never exceed (you set it).
+    leverage_enabled: bool = False
+    max_leverage: float = 1.0
 
 
 @dataclass
@@ -283,6 +302,11 @@ class Secrets:
     twak_api_key: str = ""
     twak_api_secret: str = ""
     twak_wallet_password: str = ""
+    # OMEGA: ccxt CEX API credentials (env-only; use trade-only keys, NO
+    # withdrawal permission, IP-allowlisted). Never logged, never in yaml.
+    ccxt_api_key: str = ""
+    ccxt_secret: str = ""
+    ccxt_password: str = ""
     bnb_agent_private_key: str = ""
     bnb_agent_wallet_password: str = ""
     bnb_agent_network: str = "bsc-testnet"
@@ -305,6 +329,9 @@ class Secrets:
             "twak_api_key": mark(self.twak_api_key),
             "twak_api_secret": mark(self.twak_api_secret),
             "twak_wallet_password": mark(self.twak_wallet_password),
+            "ccxt_api_key": mark(self.ccxt_api_key),
+            "ccxt_secret": mark(self.ccxt_secret),
+            "ccxt_password": mark(self.ccxt_password),
             "bnb_agent_private_key": mark(self.bnb_agent_private_key),
             "execute_trades": str(self.execute_trades),
             "execute_chain": str(self.execute_chain),
@@ -330,12 +357,18 @@ class Settings:
 
     @property
     def is_live(self) -> bool:
-        """True only when explicitly in live mode AND both safety flags set."""
-        return (
-            self.mode == "live"
-            and self.secrets.execute_trades
-            and self.execution.adapter == "twak"
-        )
+        """True only when explicitly in live mode AND both safety flags set.
+
+        ccxt on testnet stays paper (is_live False); it only flips live once the
+        sandbox is turned off, so the paper-first gate cannot be bypassed.
+        """
+        if self.mode != "live" or not self.secrets.execute_trades:
+            return False
+        if self.execution.adapter == "twak":
+            return True
+        if self.execution.adapter == "ccxt":
+            return not self.execution.testnet
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -423,6 +456,9 @@ def _load_secrets() -> Secrets:
         twak_api_key=os.getenv("TWAK_API_KEY", ""),
         twak_api_secret=os.getenv("TWAK_API_SECRET", ""),
         twak_wallet_password=os.getenv("TWAK_WALLET_PASSWORD", ""),
+        ccxt_api_key=os.getenv("HELM_CCXT_API_KEY", ""),
+        ccxt_secret=os.getenv("HELM_CCXT_SECRET", ""),
+        ccxt_password=os.getenv("HELM_CCXT_PASSWORD", ""),
         bnb_agent_private_key=os.getenv("BNB_AGENT_PRIVATE_KEY", ""),
         bnb_agent_wallet_password=os.getenv("BNB_AGENT_WALLET_PASSWORD", ""),
         bnb_agent_network=os.getenv("BNB_AGENT_NETWORK", "bsc-testnet"),
