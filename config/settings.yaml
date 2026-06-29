@@ -69,36 +69,10 @@ risk:
                                      # overrides it with the real receipt gas when it can read one.
   gas_max_pct_of_notional: 0.015     # reject a swap whose gas exceeds this fraction of its notional
                                      # (gas-aware dust floor: min trade = gas / this, ~$20 at defaults).
-  # --- Leader rotation: recycle dead capital into the engine's current #1 ----
-  # Momentum decays. A name bought days ago can fall out of the ranked shortlist
-  # while still hogging the book, starving the live leader of capital. Rotation
-  # sells that dead weight into the leader so capital always follows conviction.
-  # Hysteresis (edge + min-hold + min size + one/cycle) stops it thrashing.
-  rotation_enabled: true
-  rotation_min_edge: 0.40            # leader composite must beat the stale name by >= this (z-score pts)
-  rotation_min_hold_hours: 4.0       # never rotate a position younger than this (anti-whipsaw)
-  rotation_cash_floor_usd: 15.0      # fire when deployable cash drops below this (capital-constrained)
-  rotation_big_holding_frac: 0.45    # ...OR when a stale holding is >= this fraction of equity (regime change)
-  rotation_min_stale_usd: 10.0       # never rotate a holding smaller than this (gas would dominate)
-  rotation_topup_frac: 0.85          # treat the leader as underfunded if held below this x its max weight
-  # --- Manual swing control: operator-directed take-profit + dip rebuy --------
-  # OFF by default. When enabled, a human fires a one-shot SELL of swing_symbol
-  # to cash via the HELM_SWING_CMD env var (verb#token, e.g. sell#1); the agent
-  # then arms and auto-rebuys that name once it dips swing_rebuy_drop below the
-  # realized sell price. While armed, entries/rotation are blocked from re-buying
-  # it. Every guardrail (stops, DQ floor, drawdown taper, Sentinel, kill-switch)
-  # still applies. Enabled only on the live `max` profile below.
-  swing_enabled: false
-  swing_symbol: ""                    # name under manual swing control (e.g. "AAVE")
-  swing_rebuy_drop: 0.02             # rebuy once price <= sell_px * (1 - this)
-  # --- Volatility harvester: autonomous sell-rip / buy-dip fixed-slice grid on
-  # swing_symbol. OFF by default; enabled on the live `max` profile. Banks a
-  # slice of the position into USDT on every rip and deploys a slice of idle
-  # cash on every dip while always keeping a core + cash reserve.
-  harvest_enabled: false
-  harvest_step_pct: 0.035            # act once price moves this far from the anchor
-  harvest_trade_frac: 0.20          # slice per cross (frac of position / idle cash)
-  harvest_min_trade_usd: 4.0        # skip harvest trades smaller than this (gas)
+
+# ---------------------------------------------------------------------------
+# SIGNALS — cross-sectional momentum / relative strength + vol.
+# ---------------------------------------------------------------------------
 signals:
   lookbacks_hours: [6, 24, 72, 168]      # multi-horizon momentum
   momentum_weights: [0.15, 0.35, 0.30, 0.20]
@@ -138,10 +112,7 @@ data:
 universe:
   use_curated_tradeable: true            # trade liquid majors subset, not all 149
   extra_tradeable: []                    # add eligible symbols to widen the book
-  # FET + APE removed from exclude 2026-06-27: both now have on-chain verified,
-  # DexScreener-sellable PancakeSwap routes (addresses in execution.token_addresses).
-  # Remaining names stay excluded (no verified route -> would be unbuyable #1).
-  exclude: [ETC, PENDLE, COMP, SUSHI, SNX, LDO]
+  exclude: []                            # force-exclude symbols
 
 execution:
   adapter: paper                         # paper | twak
@@ -151,50 +122,7 @@ execution:
   quote_only_dry_run: true               # in dry-run, request live quotes but never broadcast
   bsc_rpc_urls: []                        # redundant BSC RPC failover; empty = built-in public defaults
   wallet_address: "0x2d8d17a72c8462AdbF1538Bfe03F5f2AaACb471A"  # TWAK trading wallet (holds funds); live reconcile + scoring read this. Override with HELM_WALLET_ADDRESS.
-  # SYM -> canonical Binance-Peg BEP-20 address. Each VERIFIED on-chain via
-  # symbol()/decimals() 2026-06-25 before live use. Without these the executor
-  # cannot swap (or SELL a held name) -> idle cash can't deploy + a stop can't
-  # exit. DOGE is 8-decimals (handled in twak.py); all others 18.
-  token_addresses:
-    ETH:  "0x2170Ed0880ac9A755fd29B2688956BD959F933F8"
-    CAKE: "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82"
-    AAVE: "0xfb6115445Bff7b52FeB98650C87f44907E58f802"
-    AVAX: "0x1CE0c2827e2eF14D5C4f29a091d735A204794041"
-    UNI:  "0xBf5140A22578168FD562DCcF235E5D43A02ce9B1"
-    LINK: "0xF8A0BF9cF54Bb92F17374d9e9A321E6a111a51bD"
-    DOT:  "0x7083609fCE4d1d8Dc0C979AAb8c869Ea2C873402"
-    XRP:  "0x1D2F0da169ceB9fC7B3144628dB156f3F6c60dBE"
-    ADA:  "0x3EE2200Efb3400fAbB9AacF31297cBdD1d435D47"
-    LTC:  "0x4338665CBB7B2485A8855A139b75D5e34AB0DB94"
-    BCH:  "0x8fF795a6F4D97E7887C79beA79aba5cc76444aDf"
-    ATOM: "0x0Eb3a705fc54725037CC9e008bDede697f62F335"
-    DOGE: "0xbA2aE424d960c26247Dd6c32edC70B295c744C43"
-    FIL:  "0x0D8Ce2A99Bb6e3B7Db580eD848240e4a0F9aE153"
-    INJ:  "0xa2B726B1145A4773F68593CF171187d8EBe4d495"
-    TWT:  "0x4B0F1812e5Df2A09796481Ff14017e6005508003"
-    # --- Endgame universe expansion (added 2026-06-27, final 2 days). Every
-    # address below was (1) on-chain verified: erc20 symbol() + decimals() match
-    # the expected token, AND (2) confirmed genuinely SELLABLE via DexScreener
-    # aggregated V2+V3 swap data showing real two-way buy/sell flow. This second
-    # check corrects honeypot.is false positives, which (verified) also wrongly
-    # flag AAVE and INJ as honeypots even though we trade both live. These widen
-    # the agent's high-momentum options for the catch-up sprint.
-    XPL:   "0x405FBc9004D857903bFD6b3357792D71a50726b0"  # Plasma; +21% 72h; 23.8k sells/24h, $0.45M DEX liq (PCS V3)
-    FET:   "0x031b41e504677879370e9DBcF937283A8691Fa7f"  # Fetch/ASI; +12% 24h; verified two-way (326 sells/24h)
-    PENGU: "0x6418c0dd099a9FDA397C766304CDd918233E8847"  # Pudgy Penguins; +10% 24h; verified two-way
-    APE:   "0x8f86a15EC17cb3369d8b3E666dAdBC11daA82b79"  # ApeCoin; verified two-way (539 sells/24h)
-    # --- Final-day routing widening (added 2026-06-27, ~35h left). Each verified
-    # on-chain (symbol()/decimals() == 18dp) AND DexScreener two-way sell flow on a
-    # >=$1M BSC pool. These are NOT stronger than AAVE today (AAVE +12%/24h leads
-    # them all) — they are INSURANCE: if AAVE rolls over in the final sprint the
-    # autonomous engine has a wider liquid field to rotate into instead of stalling
-    # in cash. Engine still ranks by Binance momentum, so it only rotates here if
-    # one genuinely out-moves AAVE by the rotation edge (won't churn otherwise).
-    ASTER: "0x000Ae314E2A2172a039B26378814C252734f556A"  # $6.0M liq; 341 sells/24h; 18dp
-    FF:    "0xAC23B90A79504865D52B49B327328411a23d4dB2"  # $4.1M liq; 2938 sells/24h; 18dp
-    BANANAS31: "0x3d4f0513E8a29669B960f9dBcA61861548A9A760"  # $3.8M liq; 3674 sells/24h; 18dp (on-chain sym $BANANA)
-    ZEC:   "0x1Ba42e5193dfA8B03D15dd1B86a3113bbBEF8Eeb"  # $2.6M liq; 1333 sells/24h; 18dp
-    SFP:   "0xD41FDb03Ba84762dD66a0af1a6C8540FF1ba5dfb"  # $1.2M liq; 287 sells/24h; 18dp
+  token_addresses: {}                     # SYM -> BEP-20 address overrides for on-chain marking
 
 scoring:
   # Competition scoring assumptions HELM encodes. CONFIRM against the official
@@ -228,6 +156,35 @@ profiles:
 
   # Capital-preservation posture. Empty = use the survival-first base as-is.
   balanced: {}
+
+  # =========================================================================
+  # PERSONAL / ALWAYS-ON mode  (activate with HELM_PROFILE=personal).
+  # The hackathon is over - no contest clock, no rank, no DQ prize. This profile
+  # turns OFF every tournament behavior via contest.enabled:false, which disables
+  # the phase clock, the week-long time-taper, the protect-lead / catch-up
+  # postures, AND the forced daily "must-trade". The agent simply grows the stack
+  # continuously. The deterministic survival DNA stays fully ON: kill-switch,
+  # Sentinel pre-trade checks, hash-chained ledger, and the convex drawdown
+  # taper/halt - now a *personal circuit-breaker* (not a DQ gate). Diversified,
+  # not all-in: top_n 2 + a 45% per-name cap so one hack/depeg can't take the book.
+  # =========================================================================
+  personal:
+    contest:
+      enabled: false                      # OFF: no contest clock, postures, or forced daily trade
+      halt_drawdown_pct: 25.0             # personal circuit-breaker: stop entries past -25% peak-to-trough
+    risk:
+      target_portfolio_vol_annual: 0.90   # lean into vol - this is a return engine, not a preservation book
+      max_gross_exposure: 0.97            # near-fully deployed
+      max_position_pct: 0.45              # cap any single name < half the book (hack/depeg insurance)
+      daily_loss_limit_pct: 15.0          # don't freeze on a normal red day
+      per_trade_risk_pct: 3.5             # high conviction per entry
+      take_profit_atr_mult: 6.0           # let winners run
+    signals:
+      min_composite_score: 0.10           # stay invested on thinner edge
+      top_n: 2                            # concentrated but diversified enough to survive a single-name blowup
+    regime:
+      risk_off_gross_scale: 0.62          # stay ~60%+ deployed even through fear
+      overlay_dd_gate_floor: 0.30         # gate cuts less while the drawdown budget is healthy
 
   # Contest posture: maximize expected total return inside the DQ constraint.
   aggressive:
@@ -277,137 +234,15 @@ profiles:
       endgame_escalate_dd_budget_min: 0.4  # escalate with a touch less budget in last-resort mode
     risk:
       target_portfolio_vol_annual: 1.20
-      # Endgame full-deployment: >1.0 intentionally targets ~100% deployed so idle
-      # cash is put to work in the #1 leader instead of sitting out the final push.
-      # This is NOT leverage (spot only) and the agent never orders past actual
-      # USDT (cash cap in _run_entries). The convex SURVIVAL drawdown taper still
-      # collapses gross as we approach the halt line, so the 30% DQ gate is intact.
-      max_gross_exposure: 1.40
-      # FINAL-DAY full deployment (2026-06-27): raised 0.80 -> 0.90 so the win-or-bust
-      # endgame puts ~90% into the #1 leader instead of idling 20% in cash, while the
-      # remaining ~10% stays live as grid-fuel for the harvester's buy-the-dip leg.
-      # Single-name gap-to-DQ is still ~33% (we sit at ~9% DD) and the convex survival
-      # taper + 30% gate are untouched, so this lifts the ceiling without opening the floor.
-      # LAST-SPRINT MAX VARIANCE (2026-06-28, <24h, we are BEHIND at ~+2% vs leader ~+8%):
-      # raised 0.90 -> 0.98. A behind player needs VARIANCE, not EV — +2% and -4% are
-      # both "lost the prize," so the symmetric downside barely matters while the upside
-      # tail is our only path to a paid spot. Near-100% into the engine's #1 relative-
-      # strength name maximizes capture of any market reversal. The 28% halt, convex
-      # survival taper and 30% DQ gate are UNCHANGED, so this cannot breach the floor.
-      max_position_pct: 0.98
-      # FINAL-DAY faster leadership tracking: halve the anti-whipsaw min-hold (4.0 -> 2.0h)
-      # so the agent consolidates into the engine's current #1 mover within ~2h of a restart
-      # instead of lagging a third of the contest that remains. rotation_min_edge 0.40 still
-      # demands a decisive composite gap before any rotation, so it follows real leadership
-      # changes without thrashing on noise.
-      rotation_min_hold_hours: 2.0
+      max_gross_exposure: 0.99
+      max_position_pct: 0.80              # single leader + ~20% cash buffer (gap-to-DQ insurance)
       daily_loss_limit_pct: 20.0
       per_trade_risk_pct: 5.0
       take_profit_atr_mult: 8.0
-      # Gas-aware dust floor, relaxed for the endgame. The floor is
-      # gas_usd_per_swap / gas_max_pct_of_notional = 0.30/0.015 = $20 by default.
-      # The volatility tilt selects high-ATR names, and a high-ATR name gets a
-      # WIDE risk-stop, so its risk-sized entry under the conservative build
-      # posture can land ~$12 — below a $20 floor, leaving the agent unable to
-      # BUY the very mover it ranks at the top. Raising the cap to 3% drops the
-      # floor to 0.30/0.03 = $10 so those entries clear (a one-time ~2.5-3% gas
-      # cost on a position we intend to HOLD for the run, not churn). Still
-      # rejects truly uneconomic sub-$10 micro-trades. (Gas-token adoption is
-      # prevented in agent._reconcile_onchain, never by this floor.)
-      gas_max_pct_of_notional: 0.03
-      # Self-diversification: let the agent trim an over-concentrated holding's
-      # EXCESS (above an equal-weight target) to seed a higher-ranked leader it
-      # holds none of, when it has no spare cash. This is what frees it from a
-      # 100%-one-name corner on its own -- e.g. trimming AAVE to establish INJ --
-      # without any operator nudge. Only the surplus is ever sold (the harvester
-      # keeps its core); every rotation guardrail still applies.
-      rotation_rebalance_enabled: true
-      # Manual swing lever, live-armed: lets the operator take profit on the
-      # leader on command and auto-rebuy the dip. Idle until HELM_SWING_CMD is
-      # set; all guardrails stay in force.
-      swing_enabled: true
-      swing_symbol: "AAVE"
-      swing_rebuy_drop: 0.02
-      # Autonomous volatility harvester -- the proven "profit guard" the leaders
-      # run: bank a slice of the position into USDT on every rip, buy a slice with
-      # idle cash on every dip, always keep a decaying core + cash reserve. Turns
-      # a static long into an oscillation harvester so AAVE's chop becomes locked
-      # realized gains instead of being round-tripped. Live-tunable without a
-      # redeploy: HELM_HARVEST_STEP (band) / HELM_HARVEST_FRAC (slice size).
-      harvest_enabled: true
-      harvest_step_pct: 0.035
-      harvest_trade_frac: 0.20
-      harvest_min_trade_usd: 4.0
-      harvest_trail_giveback_pct: 0.03   # scale a slice out on a 3% give-back from a fresh peak
-      # Trend-deploy: in a confirmed uptrend while still under-deployed, put idle
-      # cash to work in the leader instead of parking it in cash (the mean-reversion
-      # grid's blind spot — it banks rips and waits for a dip that may not come, so
-      # capital freed by a rotation sits idle through the move). Bounded by the
-      # position cap, the posture gross cap and the survival taper, so it can never
-      # breach the DQ gate. Live-tunable via HELM_TREND_FRAC / HELM_TREND_CEILING.
-      harvest_trend_deploy: true
-      harvest_trend_deploy_frac: 0.5            # deploy 50% of idle cash per cycle while trending
-      harvest_trend_deploy_ceiling_frac: 0.85   # up to 85% of the position cap (leaves grid headroom)
-      # Autopilot: autonomous momentum risk-on/off. Steps the WHOLE book to cash
-      # when the leader's fast (few-hour) momentum rolls over past exit_mom, and
-      # buys back into the leader once it turns up past entry_mom. The gap between
-      # the two is a dead-band so a steady trend is ridden, not churned. This is
-      # the "knows when to close and when to buy" brain -- it reacts intraday,
-      # faster than the multi-horizon composite or the ~8% trailing stop. Every
-      # guardrail still applies; live-tunable via HELM_AUTOPILOT / HELM_AP_EXIT /
-      # HELM_AP_ENTRY without a redeploy.
-      autopilot_enabled: true
-      autopilot_exit_mom: -0.015         # flat to cash when leader fast-mom <= -1.5%
-      autopilot_entry_mom: 0.015         # buy back when leader fast-mom >= +1.5%
     signals:
       min_composite_score: 0.06
-      # FINAL-DAY recent-momentum tilt: with ~1 day left, week-old trend is stale, so the
-      # multi-horizon blend is reweighted toward what is moving NOW. 24h dominates (0.40),
-      # 6h is nearly doubled (0.15 -> 0.25), and the 7-day horizon is halved (0.20 -> 0.10).
-      # Same lookbacks [6,24,72,168] -- this only shifts the agent's attention to current
-      # leadership so it rides fresh strength instead of fading stale momentum.
-      momentum_weights: [0.25, 0.40, 0.25, 0.10]
-      autopilot_fast_hours: 3            # fast-momentum window (1h closes) the autopilot reads
-      top_n: 1                            # FINAL-SPRINT MAX CONCENTRATION (2026-06-27): the #1
-                                          # competitor is no longer frozen in cash — it is a LIVE
-                                          # mover (~100% in a pumping token, +10% and climbing). A
-                                          # diversified 2-name book cannot out-run a single climbing
-                                          # leader; only a max-conviction bet on the strongest
-                                          # relative-strength name can. This profile's own
-                                          # walk-forward backtest is unambiguous: top_n=1 TRIPLES the
-                                          # tournament-winning (>=15%) rate (2%->7%) and lifts the
-                                          # ceiling +24%->+32% vs top_n=2. We concentrate the whole
-                                          # book into the engine's #1 ranked mover for the last ~30h.
-                                          # DQ guardrails stay intact: max_position_pct 0.90 keeps a
-                                          # 10% cash buffer (+ harvester grid fuel), the convex survival
-                                          # taper collapses gross before the 30% gate, and Sentinel
-                                          # pre-trade checks every
-                                          # entry. The harvester banks this single name's rips to USDT
-                                          # so realized gains can never round-trip away.
-      vol_tilt_weight: 0.7                # grid-fuel tilt: our harvester IS a grid (earns from
-                                          # price RANGE), yet vol-adjusted momentum penalises the
-                                          # very volatility that fuels it. Add z(atr%)×0.7 to the
-                                          # composite so the most volatile ROUTABLE liquid name
-                                          # (INJ, atr ~2.5% vs AAVE ~2.4%) ranks alongside AAVE —
-                                          # a volatility-FIRST selection (the proven edge of the
-                                          # leader's grid) but constrained to names with a real
-                                          # PancakeSwap route. The rebalance then seeds a
-                                          # diversified ~50/50 AAVE+INJ book (capped at
-                                          # equity/top_n, never all-in) where both the harvester
-                                          # and the directional upside live.
-    universe:
-      # Endgame (2026-06-27): scan the FULL eligible universe, not just the
-      # curated majors, so the agent can rotate into ANY eligible token that is
-      # both (a) routable — has a verified address in execution.token_addresses —
-      # and (b) the strongest momentum name. The routability + liquidity + quality
-      # filters in agent.step()/engine keep it from touching junk or unsellable
-      # names. NOTE: the earlier "XPL is a honeypot" call was a honeypot.is FALSE
-      # POSITIVE — the same tool flags AAVE/INJ (which we trade live) as honeypots.
-      # XPL was re-verified SELLABLE on DexScreener (23.8k real sells/24h, $0.45M
-      # V3 liquidity) and is now in the registry above.
-      use_curated_tradeable: false
-      extra_tradeable: []
+      top_n: 1                            # hold only the #1 relative-strength leader (fattest right tail)
     regime:
-      risk_off_gross_scale: 0.99          # stay fully deployed through fear in the endgame (was 0.80)
-      overlay_dd_gate_floor: 0.10         # apply little of the risk-off cut while DD budget is healthy
+      risk_off_gross_scale: 0.80
+      overlay_dd_gate_floor: 0.25
 

@@ -72,6 +72,8 @@ class MetaController:
 
     def _phase(self, elapsed: float) -> str:
         c = self.settings.contest
+        if not c.enabled:
+            return "live"            # personal / always-on: no contest phases
         if elapsed < c.build_phase_frac:
             return "build"
         if elapsed < c.endgame_phase_frac:
@@ -81,6 +83,8 @@ class MetaController:
     def _time_factor(self, elapsed: float) -> float:
         """Gentle base taper of aggression as the week elapses (1.0 → 0.6)."""
         c = self.settings.contest
+        if not c.enabled:
+            return 1.0              # no fixed window to taper across in personal mode
         bf, ef = c.build_phase_frac, c.endgame_phase_frac
         if elapsed < bf:
             return 1.0
@@ -133,6 +137,13 @@ class MetaController:
         """Returns (posture, gross_mult, risk_mult, reasons)."""
         c = self.settings.contest
         reasons: list[str] = []
+        if not c.enabled:
+            # Personal / always-on mode: no tournament. Grow the stack at the
+            # full profile budget; the convex survival taper (applied in assess)
+            # and the regime overlay remain the only throttles. No "protect a
+            # lead" or "catch up to a rank" games — there is no rank.
+            reasons.append(f"PERSONAL: {ret_pct:+.1f}% → grow the stack (no contest posture)")
+            return "build", 1.0, 1.0, reasons
         endgame = elapsed >= c.endgame_phase_frac
 
         leading = ret_pct >= c.protect_lead_return_pct

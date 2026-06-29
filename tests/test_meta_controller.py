@@ -197,3 +197,85 @@ def test_regime_gate_tightens_as_budget_thins(settings):
     g_deep = gated(1.0 - (10.0 / halt))
     assert g_deep < g_shallow                      # thinner budget → bigger cut
     assert deeper.exposure_scale < shallow.exposure_scale
+
+
+# --------------------------------------------------------------------------- #
+# Personal / always-on mode (contest.enabled = False): the tournament brain is
+# OFF. No phase clock, no week-long time-taper, no protect-lead / catch-up rank
+# games — the agent just grows the stack. The convex survival taper and the
+# regime overlay remain the ONLY throttles, so a deep drawdown still halts.
+# --------------------------------------------------------------------------- #
+def _personal(settings):
+    """Same settings as the fixture but with the contest brain disabled."""
+    from dataclasses import replace
+    return replace(settings, contest=replace(settings.contest, enabled=False))
+
+
+def test_personal_mode_has_no_contest_phases_or_taper(settings):
+    mc = MetaController(_personal(settings))
+    # No phase clock: every point in time reads "live", and the week-long
+    # aggression taper is flat at 1.0 (there's no fixed window to taper across).
+    assert mc._phase(0.10) == "live"
+    assert mc._phase(0.95) == "live"
+    assert mc._time_factor(0.10) == pytest.approx(1.0)
+    assert mc._time_factor(0.95) == pytest.approx(1.0)
+
+
+def test_personal_mode_ignores_lead_and_rank(settings):
+    mc = MetaController(_personal(settings))
+    lead = settings.contest.protect_lead_return_pct
+    equity = 100.0 * (1.0 + (lead + 5.0) / 100.0)
+    # Big lead, late, ranked #1 — in contest mode this forces protect_lead; in
+    # personal mode there is no lead to protect, so we keep building at full size.
+    p = mc.assess(now=_at(mc, 0.90), equity=equity, peak_equity=equity,
+                  initial_equity=100, external_rank=1)
+    assert p.phase == "live"
+    assert p.posture == "build"
+    assert p.per_trade_risk_pct == pytest.approx(settings.risk.per_trade_risk_pct, rel=1e-6)
+
+
+def test_personal_mode_ignores_being_behind(settings):
+    mc = MetaController(_personal(settings))
+    behind = settings.contest.catchup_behind_return_pct
+    equity = 100.0 * (1.0 + (behind - 1.0) / 100.0)  # below the catch-up threshold
+    # Behind and late — contest mode would add catch-up variance; personal mode
+    # does not chase a rank, so aggression stays at baseline (no >1.0 bump).
+    p = mc.assess(now=_at(mc, 0.95), equity=equity, peak_equity=equity, initial_equity=100)
+    assert p.posture == "build"
+    assert p.aggression_scale == pytest.approx(1.0, rel=1e-6)
+
+
+def test_personal_mode_still_halts_on_deep_drawdown(settings):
+    """Survival DNA is NOT optional: the convex taper + halt line stay fully on in
+    personal mode (the halt is now a personal circuit-breaker, not a DQ gate).
+    """
+    mc = MetaController(_personal(settings))
+    halt = settings.contest.halt_drawdown_pct
+    equity = 100.0 * (1.0 - (halt + 1.0) / 100.0)  # past the halt line
+    p = mc.assess(now=_at(mc, 0.50), equity=equity, peak_equity=100, initial_equity=100)
+    assert p.halt_new_risk is True
+    assert p.posture == "halt"
+    assert p.max_gross_pct == 0.0
+    # A mid-budget drawdown still de-risks convexly (survival dominates).
+    eq2 = 100.0 * (1.0 - (halt * 0.5) / 100.0)
+    p2 = mc.assess(now=_at(mc, 0.10), equity=eq2, peak_equity=100, initial_equity=100)
+    assert 0.0 < p2.exposure_scale < 0.5 * settings.risk.max_gross_exposure
+
+
+def test_personal_profile_loads_with_contest_disabled():
+    """The shipped `personal` profile wires contest.enabled=False + a 25% personal
+    circuit-breaker, without disturbing the default (balanced) profile."""
+    import os
+    from helm.config import load_settings
+    prev = os.environ.get("HELM_PROFILE")
+    os.environ["HELM_PROFILE"] = "personal"
+    try:
+        s = load_settings()
+    finally:
+        if prev is None:
+            os.environ.pop("HELM_PROFILE", None)
+        else:
+            os.environ["HELM_PROFILE"] = prev
+    assert s.contest.enabled is False
+    assert s.contest.halt_drawdown_pct == pytest.approx(25.0)
+    assert s.signals.top_n == 2

@@ -38,10 +38,17 @@ def _fmt_pct(x: float) -> str:
 
 
 def _parse_until(raw: str | None):
-    """Parse an ISO-8601 deadline for ``run --until``; assume UTC if naive."""
+    """Parse an ISO-8601 deadline for ``run --until``; assume UTC if naive.
+
+    The sentinels "none" / "never" / "forever" (case-insensitive) mean "no
+    deadline" — run indefinitely. They map to a far-future timestamp so the
+    supervised loop never exits on time (personal / always-on mode).
+    """
     if not raw:
         return None
     from datetime import datetime, timezone
+    if str(raw).strip().lower() in {"none", "never", "forever"}:
+        return datetime(2099, 1, 1, tzinfo=timezone.utc)
     try:
         dt = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
     except ValueError:

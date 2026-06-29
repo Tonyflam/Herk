@@ -12,6 +12,7 @@
 # Usage:
 #   scripts/run_live.sh [END_UTC] [INTERVAL_SECONDS]
 #   scripts/run_live.sh 2026-06-29T00:00:00Z 3600
+#   scripts/run_live.sh none 3600        # personal / always-on (no deadline)
 #
 # Live trading still requires the two arming flags (HELM_EXECUTE_TRADES=1 and
 # HELM_EXECUTE_CHAIN=1) and HELM_MODE=live in .env — this script broadcasts
@@ -21,6 +22,12 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 END_UTC="${1:-2026-06-29T00:00:00Z}"
+# Personal / always-on mode: "none" / "never" / "forever" (case-insensitive)
+# means "no deadline" — run indefinitely. We map it to a far-future timestamp so
+# the existing deadline math below keeps working unchanged.
+case "${END_UTC,,}" in
+  none|never|forever) END_UTC="2099-01-01T00:00:00Z" ;;
+esac
 INTERVAL="${2:-3600}"
 MAX_RESTARTS="${HELM_MAX_RESTARTS:-50}"
 BACKOFF=10          # seconds, grows on repeated fast failures
