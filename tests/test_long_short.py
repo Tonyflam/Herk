@@ -26,7 +26,7 @@ from helm.config import load_settings
 from helm.execution.base import Fill, Order
 from helm.execution.ccxt_adapter import CcxtAdapter
 from helm.portfolio import Portfolio
-from helm.risk.sizing import plan_position
+from helm.risk.sizing import liquidation_price, max_safe_leverage, plan_position
 from helm.signals.engine import SignalSnapshot, SymbolSignal
 from helm.universe import rank_full_market
 
@@ -149,12 +149,13 @@ class _FakeEx:
     def __init__(self, fill_price: float = 100.0):
         self.fill_price = fill_price
         self.calls: list[dict] = []
+        self.levs: list[tuple] = []
 
     def load_markets(self):
         return {}
 
     def set_leverage(self, lev, market):
-        pass
+        self.levs.append((lev, market))
 
     def create_order(self, symbol, type_, side, amount, price=None, params=None):
         self.calls.append({"symbol": symbol, "side": side,
@@ -271,6 +272,59 @@ def test_perp_rows_feed_rank_full_market_drops_stable_and_sorts():
 def test_perp_ticker_rows_empty_for_spot_market():
     a = CcxtAdapter(_ccxt_settings("spot"), client=_discovery_venue())
     assert a.perp_ticker_rows() == []                         # perps-only discovery
+
+
+# ----------------------------------------------- liquidation-distance buffer
+def test_liquidation_price_direction_and_leverage():
+    # 5x: long liquidates ~19.5% below, short ~19.5% above (incl. maint margin).
+    assert liquidation_price(100.0, 1, 5.0) == pytest.approx(80.5, abs=1e-6)
+    assert liquidation_price(100.0, -1, 5.0) == pytest.approx(119.5, abs=1e-6)
+    # 1x (or less) is fully collateralised -> far, non-binding bounds.
+    assert liquidation_price(100.0, 1, 1.0) == 0.0
+    assert liquidation_price(100.0, -1, 1.0) == pytest.approx(200.0)
+
+
+def test_max_safe_leverage_tightens_with_wider_stops():
+    # Tight stop (2%) -> safe leverage pinned at the hard ceiling.
+    assert max_safe_leverage(100.0, 2.0, hard_cap=10.0) == pytest.approx(10.0)
+    # Medium stop (8%) -> dialled below the ceiling.
+    mid = max_safe_leverage(100.0, 8.0, hard_cap=10.0)
+    assert 1.0 < mid < 10.0
+    # Wide stop (40%) -> close to 1x (barely any leverage is survivable).
+    wide = max_safe_leverage(100.0, 40.0, hard_cap=10.0)
+    assert wide < mid
+    assert wide >= 1.0
+
+
+def test_safe_leverage_keeps_stop_inside_liquidation():
+    # At the derived safe leverage the stop must sit strictly inside liquidation.
+    entry, stop_dist = 100.0, 8.0
+    lev = max_safe_leverage(entry, stop_dist, hard_cap=20.0)
+    liq_long = liquidation_price(entry, 1, lev)
+    liq_short = liquidation_price(entry, -1, lev)
+    assert (entry - stop_dist) > liq_long                     # long stop above liq
+    assert (entry + stop_dist) < liq_short                    # short stop below liq
+
+
+def test_ccxt_clamps_per_trade_leverage():
+    s = _ccxt_settings("swap")
+    s.execution.leverage_enabled = True
+    s.execution.max_leverage = 10.0
+    fake = _FakeEx(100.0)
+    a = CcxtAdapter(s, client=fake)
+    a.execute(Order("INJ", "sell", ref_price=100.0, qty=1.0, leverage=3.0))
+    assert fake.levs[-1][0] == pytest.approx(3.0)             # honoured (<= ceiling)
+    a.execute(Order("INJ", "sell", ref_price=100.0, qty=1.0, leverage=20.0))
+    assert fake.levs[-1][0] == pytest.approx(10.0)            # clamped to ceiling
+    a.execute(Order("INJ", "sell", ref_price=100.0, qty=1.0, leverage=0.0))
+    assert fake.levs[-1][0] == pytest.approx(10.0)            # 0 -> use ceiling
+
+
+def test_ccxt_no_leverage_when_disabled():
+    fake = _FakeEx(100.0)
+    a = CcxtAdapter(_ccxt_settings("swap"), client=fake)   # leverage_enabled False
+    a.execute(Order("INJ", "sell", ref_price=100.0, qty=1.0, leverage=5.0))
+    assert fake.levs == []                                    # set_leverage never called
 
 
 # ------------------------------------------------------- agent integration

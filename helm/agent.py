@@ -30,7 +30,7 @@ from .execution.paper import PaperExecutor
 from .ledger import Ledger
 from .portfolio import Portfolio, Position
 from .risk.sentinel import Sentinel
-from .risk.sizing import plan_position
+from .risk.sizing import max_safe_leverage, plan_position
 from .signals.engine import SignalEngine, SignalSnapshot
 from .signals.regime import RegimeAssessment
 from .universe import eligible_set, is_stable, tradeable_universe
@@ -125,6 +125,18 @@ class Agent:
             )
         except Exception:
             return []
+
+    # ------------------------------------------------------ per-trade leverage
+    def _safe_leverage(self, price: float, stop_distance: float) -> float:
+        """Per-trade leverage cap so the ATR stop always sits inside the
+        liquidation price (survival-first). Returns 0.0 — meaning "let the
+        adapter use its own ceiling" — whenever leverage is off or we're not on
+        a perp venue, so the spot / paper path is completely unaffected.
+        """
+        ex = self.settings.execution
+        if not (ex.leverage_enabled and ex.market_type == "swap"):
+            return 0.0
+        return max_safe_leverage(price, stop_distance, ex.max_leverage)
 
     # ----------------------------------------------------------- persistence
     def _load_state(self) -> Portfolio | None:
@@ -1291,7 +1303,8 @@ class Agent:
                 exec_price = self._x402_prebuy(sig.symbol, sig.price, now)
             order = Order(sig.symbol, "buy", ref_price=exec_price,
                           notional_usd=plan.notional_usd, liquidity_usd=sig.liquidity_usd,
-                          reason="entry")
+                          reason="entry",
+                          leverage=self._safe_leverage(exec_price, plan.stop_distance))
             fill = self.executor.execute(order)
             if not fill.ok or fill.notional_usd <= 0 or fill.qty <= 0:
                 # A failed/empty live swap must NOT book a phantom position or a
@@ -1386,7 +1399,8 @@ class Agent:
                 continue
             order = Order(sig.symbol, "sell", ref_price=sig.price, qty=qty,
                           notional_usd=plan.notional_usd, liquidity_usd=sig.liquidity_usd,
-                          reason="short_entry", reduce_only=False)
+                          reason="short_entry", reduce_only=False,
+                          leverage=self._safe_leverage(sig.price, plan.stop_distance))
             fill = self.executor.execute(order)
             if not fill.ok or fill.qty <= 0:
                 self.ledger.append("alert", {"reason": "short_entry_unfilled",

@@ -116,12 +116,17 @@ class CcxtAdapter(ExecutionAdapter):
         return out[:160]
 
     # ---------------------------------------------------------------- leverage
-    def _apply_leverage(self, market: str) -> float:
-        """Set venue leverage for perps, clamped to the hard ceiling. Returns
-        the leverage actually requested (1.0 for spot or when disabled)."""
+    def _apply_leverage(self, market: str, order_leverage: float = 0.0) -> float:
+        """Set venue leverage for perps, clamped to the hard ceiling AND to any
+        per-trade cap the caller derived from the stop distance (so the stop
+        always sits inside the liquidation price). Returns the leverage actually
+        requested (1.0 for spot or when disabled)."""
         if self.market_type != "swap" or not self.leverage_enabled:
             return 1.0
-        lev = max(1.0, min(self.max_leverage, float(self.max_leverage)))
+        lev = self.max_leverage
+        if order_leverage and order_leverage > 0:
+            lev = min(lev, float(order_leverage))
+        lev = max(1.0, min(self.max_leverage, lev))
         try:
             self._client.set_leverage(lev, market)
         except Exception:
@@ -205,7 +210,7 @@ class CcxtAdapter(ExecutionAdapter):
             return fail(f"load_markets: {self._sanitize(str(e))}")
 
         # Leverage (perps only) — always clamped to the hard ceiling.
-        self._apply_leverage(market)
+        self._apply_leverage(market, order.leverage)
 
         # Size: prefer an explicit base qty when present (closes, shorts, spot
         # sells); otherwise derive it from notional/ref (a long OPEN sized in USD).

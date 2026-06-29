@@ -41,6 +41,7 @@ class Order:
     liquidity_usd: float = 0.0
     reason: str = ""
     reduce_only: bool = False  # perps: True = close/reduce only (never opens a new position)
+    leverage: float = 0.0      # perps: per-trade leverage cap (0 = use adapter default/ceiling)
 
 
 @dataclass

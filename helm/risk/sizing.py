@@ -111,3 +111,49 @@ def plan_position(
         pct_of_equity=(notional / equity) if equity > 0 else 0.0,
         binding_constraint=binding,
     )
+
+
+def liquidation_price(
+    entry: float,
+    direction: int,
+    leverage: float,
+    maint_margin: float = 0.005,
+) -> float:
+    """Approximate isolated-margin liquidation price for a linear USDT perp.
+
+    Long positions liquidate BELOW entry, shorts ABOVE. At 1x (or less) a long
+    cannot be liquidated above 0 and a short only at ~2x entry, so we return a
+    far bound. ``maint_margin`` shrinks the usable distance the way a venue's
+    maintenance-margin requirement does (liquidation hits slightly early).
+    """
+    if entry <= 0 or leverage <= 1.0:
+        return 0.0 if direction > 0 else entry * 2.0
+    frac = max(0.0, 1.0 / leverage - maint_margin)
+    if direction < 0:
+        return entry * (1.0 + frac)
+    return entry * (1.0 - frac)
+
+
+def max_safe_leverage(
+    entry: float,
+    stop_distance: float,
+    hard_cap: float,
+    buffer_frac: float = 0.5,
+    maint_margin: float = 0.005,
+) -> float:
+    """Largest leverage (in ``[1, hard_cap]``) at which the protective stop still
+    sits strictly inside the liquidation price, keeping ``1 - buffer_frac`` of the
+    liquidation distance as cushion. Sized this way the ATR stop ALWAYS fires
+    before the venue force-liquidates — so a single adverse candle can't wipe the
+    margin. ``go hard`` (max leverage) only when the stop is tight enough to be
+    safe; otherwise leverage is automatically dialled down per trade.
+    """
+    hard_cap = max(1.0, float(hard_cap))
+    if entry <= 0 or stop_distance <= 0 or buffer_frac <= 0:
+        return hard_cap
+    # want: stop_distance <= buffer_frac * liq_distance,
+    # with liq_distance ≈ entry * (1/lev - maint_margin). Solve for lev:
+    rhs = stop_distance / (buffer_frac * entry) + maint_margin
+    if rhs <= 0:
+        return hard_cap
+    return max(1.0, min(hard_cap, 1.0 / rhs))
