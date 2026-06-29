@@ -159,6 +159,32 @@ def fetch_quote(symbol: str, client: httpx.Client | None = None) -> Quote:
             client.close()
 
 
+def fetch_24h_tickers(client: httpx.Client | None = None) -> list[dict]:
+    """All 24h tickers from the first reachable public Binance host (keyless).
+
+    Returns the raw exchange list (each row has ``symbol``, ``lastPrice``,
+    ``quoteVolume``, ``priceChangePercent`` ...). This is the OMEGA full-market
+    discovery feed — thousands of pairs in one keyless call. Returns an empty
+    list on total failure so the caller can fall back to the curated book and is
+    never left blind.
+    """
+    own = client is None
+    client = client or httpx.Client()
+    try:
+        for host in _KLINE_HOSTS:
+            try:
+                r = _get(client, f"{host}/api/v3/ticker/24hr")
+                data = r.json()
+                if isinstance(data, list):
+                    return data
+            except Exception:
+                continue
+        return []
+    finally:
+        if own:
+            client.close()
+
+
 def fetch_fear_greed(client: httpx.Client | None = None) -> tuple[int, str, Provenance]:
     """Crypto Fear & Greed Index (0-100) from alternative.me (free, public)."""
     own = client is None

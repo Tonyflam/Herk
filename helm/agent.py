@@ -90,6 +90,27 @@ class Agent:
             return CcxtAdapter(self.settings)
         return PaperExecutor(self.settings)
 
+    # ------------------------------------------------------- full-market book
+    def _full_market_universe(self) -> list[str]:
+        """OMEGA full-market discovery: rank the venue's whole 24h-ticker list
+        into the top liquid base symbols. Falls back to an empty list on any
+        failure so the caller keeps the curated book (the agent is never blind).
+        """
+        s = self.settings
+        try:
+            from .data.sources import fetch_24h_tickers
+            from .universe import rank_full_market
+            tickers = fetch_24h_tickers()
+            return rank_full_market(
+                tickers,
+                quote=s.execution.quote_currency,
+                top_n=s.universe.full_market_top_n,
+                min_vol_usd=s.universe.full_market_min_vol_usd,
+                exclude=tuple(s.universe.exclude),
+            )
+        except Exception:
+            return []
+
     # ----------------------------------------------------------- persistence
     def _load_state(self) -> Portfolio | None:
         if not self.state_path.exists():
@@ -218,14 +239,20 @@ class Agent:
             extra=tuple(s.universe.extra_tradeable),
             exclude=tuple(s.universe.exclude),
         ))
-        # Only rank names the executor can actually route on-chain (a verified
-        # BSC contract address resolves). Without this the engine can top-rank a
-        # name with no swap route (a CEX-only / native-L1 mover, or a honeypot
-        # we never wired), the entry loop wastes its slot on an unfillable order,
-        # and idle cash never deploys. token_meta checks the settings override
-        # then the builtin registry; None => not routable.
-        from .data.onchain import token_meta
-        universe = [u for u in universe if token_meta(s, u) is not None]
+        if s.universe.full_market:
+            # OMEGA: discover the venue's most-liquid names live (thousands of
+            # pairs -> top_n). A CEX routes any listed pair, so the on-chain BSC
+            # address filter below does NOT apply in this mode.
+            universe = list(self._full_market_universe()) or universe
+        else:
+            # Only rank names the executor can actually route on-chain (a verified
+            # BSC contract address resolves). Without this the engine can top-rank a
+            # name with no swap route (a CEX-only / native-L1 mover, or a honeypot
+            # we never wired), the entry loop wastes its slot on an unfillable order,
+            # and idle cash never deploys. token_meta checks the settings override
+            # then the builtin registry; None => not routable.
+            from .data.onchain import token_meta
+            universe = [u for u in universe if token_meta(s, u) is not None]
         snap = self.engine.compute(universe)
 
         prices = {sig.symbol: sig.price for sig in snap.signals if sig.price > 0}

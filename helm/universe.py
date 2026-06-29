@@ -44,6 +44,9 @@ ELIGIBLE: tuple[str, ...] = (
 STABLES: frozenset[str] = frozenset({
     "USDT", "USDC", "DAI", "USD1", "USDe", "TUSD", "FDUSD", "USDD", "STABLE",
     "USDf", "USDF", "FRAX", "FRXUSD", "DUSD", "lisUSD", "XUSD", "EURI", "BILL",
+    # Additional stablecoins / fiat quote-bases that surface in full-market
+    # discovery (no momentum -> never a risk trade).
+    "RLUSD", "PYUSD", "AEUR", "USDP", "EUR", "GBP", "TRY", "BRL", "ARS",
 })
 
 # Gold-pegged — low-vol, not USD-stable; excluded from default trading.
@@ -94,6 +97,64 @@ def tradeable_universe(
         seen.add(sym)
         out.append(sym)
     return out
+
+
+# Binance-style leveraged-token suffixes (e.g. BTCUP / ETHDOWN / XRPBULL). These
+# decay and must never enter the tradeable book. The prefix-length guard keeps
+# legitimate names that merely END in these letters (e.g. JUP, the "UP" is part
+# of the name) from being dropped.
+_LEVERAGED_SUFFIXES: tuple[str, ...] = ("UP", "DOWN", "BULL", "BEAR")
+
+
+def _is_leveraged_token(base: str) -> bool:
+    for sfx in _LEVERAGED_SUFFIXES:
+        if base.endswith(sfx) and (len(base) - len(sfx)) >= 2:
+            return True
+    return False
+
+
+def rank_full_market(
+    tickers: list[dict],
+    quote: str = "USDT",
+    top_n: int = 60,
+    min_vol_usd: float = 5_000_000.0,
+    exclude: tuple[str, ...] = (),
+) -> list[str]:
+    """Rank a venue's whole 24h-ticker list into the top liquid base symbols.
+
+    Pure / deterministic — no network. Filters a raw exchange ``ticker/24hr``
+    list (each row a dict with at least ``symbol`` and ``quoteVolume``) to
+    ``{base}{quote}`` spot pairs, drops stables, gold-pegged, leveraged tokens
+    and the base/quote currency itself, keeps names with >= ``min_vol_usd`` of
+    24h quote volume, sorts by that volume descending and returns the top
+    ``top_n`` bare base symbols. This is the OMEGA "thousands of tokens" unlock:
+    the book is whatever the live market says is most liquid, not a fixed list.
+    """
+    q = quote.upper()
+    excl = set(exclude)
+    rows: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for t in tickers:
+        sym = str(t.get("symbol", "")).upper()
+        if not sym.endswith(q):
+            continue
+        base = sym[: -len(q)]
+        if not base or base in seen or base in excl:
+            continue
+        if base in STABLES or base in PEGGED_COMMODITY or base == BASE_CURRENCY:
+            continue
+        if _is_leveraged_token(base):
+            continue
+        try:
+            vol = float(t.get("quoteVolume", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if vol < min_vol_usd:
+            continue
+        seen.add(base)
+        rows.append((base, vol))
+    rows.sort(key=lambda r: r[1], reverse=True)
+    return [base for base, _ in rows[:top_n]]
 
 
 # Sanity: curated must be a strict subset of eligible (guards typos at import).
