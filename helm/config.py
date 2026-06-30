@@ -573,4 +573,20 @@ def load_settings(path: str | Path | None = None) -> Settings:
             s.signals.min_composite_score = max(0.0, float(os.environ["HELM_MIN_SCORE"]))
         except ValueError:
             pass
+    # On a CEX the per-trade cost is a taker fee (≈$0.01), not BSC gas ($0.30).
+    # The dust floor = gas / gas_max_pct, so the BSC default produces a $20 floor
+    # that blocks every sub-$20 perp trade on Bybit. HELM_GAS_USD lets ccxt deploys
+    # set the real fee and unlock small-book trading.
+    if os.getenv("HELM_GAS_USD"):
+        try:
+            s.risk.gas_usd_per_swap = max(0.0, float(os.environ["HELM_GAS_USD"]))
+        except ValueError:
+            pass
+    # Swing controls — manual buy/sell/dip-rebuy of a single symbol via env so the
+    # operator can fire a one-shot order (HELM_SWING_CMD=buy#nonce) into the
+    # agent's book without a redeploy. Pairs with HELM_SWING_CMD / HELM_SWING_REBUY_PX.
+    if os.getenv("HELM_SWING_ON") is not None:
+        s.risk.swing_enabled = _env_bool("HELM_SWING_ON", s.risk.swing_enabled)
+    if os.getenv("HELM_SWING_SYMBOL"):
+        s.risk.swing_symbol = os.environ["HELM_SWING_SYMBOL"].strip().upper()
     return s
