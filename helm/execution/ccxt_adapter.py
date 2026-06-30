@@ -21,6 +21,8 @@ fake exchange (no network, no ccxt install required for the core test suite).
 
 from __future__ import annotations
 
+import time
+
 from ..config import Settings
 from .base import ExecutionAdapter, Fill, Order, _now_iso
 
@@ -247,7 +249,53 @@ class CcxtAdapter(ExecutionAdapter):
         except Exception as e:
             return fail(self._sanitize(str(e)))
 
+        # Market orders on some venues (notably Bybit) ACK before the fill is
+        # reflected in the create response (filled=0). Re-fetch so the booked
+        # Fill carries the REAL settled qty/price — otherwise the agent treats a
+        # filled live order as 'unfilled' and its book desyncs from the venue.
+        res = self._settle_order(res, market)
         return self._fill_from_order(order, res)
+
+    # ------------------------------------------------------------------ settle
+    def _settle_order(self, res: dict, market: str) -> dict:
+        """Re-fetch an order until its fill is reported (handles async market
+        fills). Returns the freshest order dict; degrades to the original on any
+        failure so a successful trade is never lost to a transient read error."""
+        res = res or {}
+        if float(res.get("filled") or 0.0) > 0 and (res.get("average") or res.get("price")):
+            return res
+        oid = res.get("id") or (res.get("info") or {}).get("orderId")
+        if not oid:
+            return res
+        last = res
+        for _ in range(6):
+            time.sleep(0.35)
+            o = self._fetch_settled(oid, market)
+            if o:
+                last = o
+                if float(o.get("filled") or 0.0) > 0:
+                    return o
+        return last
+
+    def _fetch_settled(self, oid: str, market: str) -> dict | None:
+        """Read a placed order's settled state. Bybit's ``fetch_order`` requires
+        ``params.acknowledged=True`` (else it raises); fall back to scanning the
+        recent closed orders by id for venues where ``fetch_order`` is unavailable
+        or restricted."""
+        if hasattr(self._client, "fetch_order"):
+            try:
+                return self._client.fetch_order(oid, market, {"acknowledged": True})
+            except Exception:
+                pass
+        if hasattr(self._client, "fetch_closed_orders"):
+            try:
+                rows = self._client.fetch_closed_orders(market, None, 20) or []
+                for o in reversed(rows):
+                    if str(o.get("id")) == str(oid):
+                        return o
+            except Exception:
+                pass
+        return None
 
     # ------------------------------------------------------------------- parse
     def _fill_from_order(self, order: Order, res: dict) -> Fill:

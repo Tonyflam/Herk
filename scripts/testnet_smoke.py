@@ -63,6 +63,7 @@ def _show_fill(tag: str, fill) -> bool:
 
 def main() -> int:
     do_trade = "--trade" in sys.argv[1:]
+    allow_live = "--live" in sys.argv[1:]   # explicit opt-in to REAL (non-sandbox) orders
 
     # Env overrides (HELM_EXCHANGE / HELM_MARKET_TYPE / HELM_TESTNET / keys ...)
     # are applied inside load_settings(); force the ccxt adapter for this harness.
@@ -129,12 +130,16 @@ def main() -> int:
         print("read-only checks done. re-run with --trade to place TESTNET orders.")
         return 0 if all_ok else 1
 
-    # --- live TESTNET order legs (sandbox only) -------------------------------
-    if not ex.testnet:
+    # --- order legs: sandbox by default; real only with explicit --live --------
+    if not ex.testnet and not allow_live:
         print("-" * 64)
-        print("REFUSING to trade: HELM_TESTNET is not set. Keep the harness on the "
-              "sandbox (export HELM_TESTNET=1).")
+        print("REFUSING to trade: HELM_TESTNET is off and --live was not passed. "
+              "Re-run with --live to place REAL orders, or export HELM_TESTNET=1 "
+              "to use the sandbox.")
         return 1
+    if not ex.testnet and allow_live:
+        print("-" * 64)
+        print("!! LIVE MODE: placing REAL orders on " + str(ex.exchange) + " with real funds.")
     if not adapter.available or px <= 0:
         print("-" * 64)
         print("cannot trade: missing credentials or price. fix the FAILs above.")
@@ -155,8 +160,9 @@ def main() -> int:
     except Exception:
         pass
     eff_usd = qty * px
+    venue_tag = "REAL" if not ex.testnet else "TESTNET"
     print("-" * 64)
-    print(f"placing tiny TESTNET orders (~${eff_usd:.2f}/leg, qty={qty:.8f}); "
+    print(f"placing tiny {venue_tag} orders (~${eff_usd:.2f}/leg, qty={qty:.8f}); "
           "open then immediately close each side...")
 
     # Long: buy to open (sized to clear the floor), then sell reduce-only to close.

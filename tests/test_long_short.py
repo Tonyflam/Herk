@@ -352,6 +352,36 @@ def test_ccxt_rejects_amount_below_lot_size():
     assert not fill.ok
     assert fake.calls == []                                   # never sent to venue
 
+
+# ------------------------------------------------- async market-fill settle
+class _FakeAsyncEx(_FakeEx):
+    """Create ACKs with filled=0 (like Bybit); the fill only appears on a
+    follow-up fetch_order — the adapter must re-fetch to book it correctly."""
+
+    def create_order(self, symbol, type_, side, amount, price=None, params=None):
+        self.calls.append({"symbol": symbol, "side": side,
+                           "amount": amount, "params": params or {}})
+        oid = "oid%d" % len(self.calls)
+        self._pending = getattr(self, "_pending", {})
+        self._pending[oid] = (amount,)
+        return {"id": oid, "filled": 0, "average": None, "info": {"orderId": oid}}
+
+    def fetch_order(self, oid, symbol=None, params=None):
+        (amount,) = self._pending[oid]
+        notional = amount * self.fill_price
+        return {"id": oid, "filled": amount, "amount": amount,
+                "average": self.fill_price, "cost": notional,
+                "fee": {"cost": notional * 0.001, "currency": "USDT"}, "status": "closed"}
+
+
+def test_ccxt_settles_async_fill_via_fetch_order():
+    fake = _FakeAsyncEx(0.0726)
+    a = CcxtAdapter(_ccxt_settings("swap"), client=fake)
+    fill = a.execute(Order("DOGE", "buy", ref_price=0.0726, notional_usd=7.0))
+    assert fill.ok                                       # settled, NOT 'unfilled'
+    assert fill.qty == pytest.approx(7.0 / 0.0726, rel=1e-6)
+    assert fill.price == pytest.approx(0.0726)
+
 # ------------------------------------------------------- agent integration
 def test_agent_opens_short_via_engine(tmp_path):
     agent = _agent(tmp_path, _ls_settings())
