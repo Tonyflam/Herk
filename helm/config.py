@@ -545,4 +545,23 @@ def load_settings(path: str | Path | None = None) -> Settings:
         # wallet and mis-mark the book to an emptied (post-transfer) balance.
         s.scoring.mark_from_onchain = _env_bool(
             "HELM_MARK_FROM_ONCHAIN", s.scoring.mark_from_onchain)
+    # --- momentum-rider tuning (ride genuine motion, bank on the pullback,
+    #     rotate fast). Live-tunable so the exit/rotation discipline can be
+    #     sharpened without a redeploy. Pair with HELM_HARVEST_GIVEBACK /
+    #     HELM_HARVEST_FRAC (trail-guard pullback bank). ----------------------
+    if os.getenv("HELM_TP_ATR_MULT"):
+        try:
+            s.risk.take_profit_atr_mult = max(0.5, float(os.environ["HELM_TP_ATR_MULT"]))
+        except ValueError:
+            pass
+    if os.getenv("HELM_ROTATION_HOLD_H"):
+        try:
+            s.risk.rotation_min_hold_hours = max(0.0, float(os.environ["HELM_ROTATION_HOLD_H"]))
+        except ValueError:
+            pass
+    if os.getenv("HELM_ROTATION_EDGE"):
+        try:
+            s.risk.rotation_min_edge = max(0.0, float(os.environ["HELM_ROTATION_EDGE"]))
+        except ValueError:
+            pass
     return s
