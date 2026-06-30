@@ -564,4 +564,13 @@ def load_settings(path: str | Path | None = None) -> Settings:
             s.risk.rotation_min_edge = max(0.0, float(os.environ["HELM_ROTATION_EDGE"]))
         except ValueError:
             pass
+    # Conviction bar: composite must clear +HELM_MIN_SCORE to go long (or fall
+    # below -HELM_MIN_SCORE to short). Raise it to make the agent a patient
+    # sniper — sit in cash until a genuinely strong setup appears, never enter on
+    # a marginal edge.
+    if os.getenv("HELM_MIN_SCORE"):
+        try:
+            s.signals.min_composite_score = max(0.0, float(os.environ["HELM_MIN_SCORE"]))
+        except ValueError:
+            pass
     return s
