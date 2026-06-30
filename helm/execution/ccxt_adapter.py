@@ -223,6 +223,17 @@ class CcxtAdapter(ExecutionAdapter):
         if amount <= 0:
             return fail("zero amount")
 
+        # Round to the venue's lot-size precision so a REAL exchange accepts the
+        # order (Bybit/Binance reject "too many decimals"). The fake test client
+        # has no amount_to_precision -> we keep the raw amount untouched.
+        if hasattr(self._client, "amount_to_precision"):
+            try:
+                amount = float(self._client.amount_to_precision(market, amount))
+            except Exception:
+                pass
+            if amount <= 0:
+                return fail("amount below venue lot size")
+
         # reduceOnly on perps guarantees a close can never accidentally flip into
         # a fresh opposite position if the book and the venue disagree on size.
         params: dict = {}

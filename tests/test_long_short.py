@@ -14,6 +14,7 @@ These pin the contract that makes shorting safe and correct:
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -326,6 +327,30 @@ def test_ccxt_no_leverage_when_disabled():
     a.execute(Order("INJ", "sell", ref_price=100.0, qty=1.0, leverage=5.0))
     assert fake.levs == []                                    # set_leverage never called
 
+# ------------------------------------------------- venue lot-size precision
+class _FakePrecEx(_FakeEx):
+    """Fake venue with a 0.001 lot step (rounds DOWN like a real exchange)."""
+
+    def amount_to_precision(self, symbol, amount):
+        return f"{math.floor(float(amount) * 1000) / 1000:.3f}"
+
+
+def test_ccxt_rounds_amount_to_venue_lot_precision():
+    fake = _FakePrecEx(99.0)
+    a = CcxtAdapter(_ccxt_settings("swap"), client=fake)
+    # 233 / 99 = 2.35353... -> floored to the 0.001 lot step = 2.353
+    fill = a.execute(Order("INJ", "buy", ref_price=99.0, notional_usd=233.0))
+    assert fill.ok
+    assert fake.calls[0]["amount"] == pytest.approx(2.353)
+
+
+def test_ccxt_rejects_amount_below_lot_size():
+    fake = _FakePrecEx(100.0)
+    a = CcxtAdapter(_ccxt_settings("swap"), client=fake)
+    # 0.05 / 100 = 0.0005 -> rounds to 0.000 -> below the venue lot size
+    fill = a.execute(Order("INJ", "buy", ref_price=100.0, notional_usd=0.05))
+    assert not fill.ok
+    assert fake.calls == []                                   # never sent to venue
 
 # ------------------------------------------------------- agent integration
 def test_agent_opens_short_via_engine(tmp_path):
