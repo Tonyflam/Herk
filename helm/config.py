@@ -589,4 +589,19 @@ def load_settings(path: str | Path | None = None) -> Settings:
         s.risk.swing_enabled = _env_bool("HELM_SWING_ON", s.risk.swing_enabled)
     if os.getenv("HELM_SWING_SYMBOL"):
         s.risk.swing_symbol = os.environ["HELM_SWING_SYMBOL"].strip().upper()
+    # Full-deploy toggles — pair these with HELM_AUTOPILOT to make the agent
+    # autonomously bank rips (harvester), redeploy idle cash on a confirmed
+    # uptrend (trend-deploy), and re-enter after a flush (autopilot). HELM_TOP_N
+    # widens how many top-ranked names each cycle considers entering, so the
+    # sniper can fill multiple positions on the same tick.
+    if os.getenv("HELM_HARVEST_ON") is not None:
+        s.risk.harvest_enabled = _env_bool("HELM_HARVEST_ON", s.risk.harvest_enabled)
+    if os.getenv("HELM_TREND_DEPLOY") is not None:
+        s.risk.harvest_trend_deploy = _env_bool(
+            "HELM_TREND_DEPLOY", s.risk.harvest_trend_deploy)
+    if os.getenv("HELM_TOP_N"):
+        try:
+            s.signals.top_n = max(1, int(os.environ["HELM_TOP_N"]))
+        except ValueError:
+            pass
     return s
