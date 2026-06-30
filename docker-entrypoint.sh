@@ -34,14 +34,20 @@ fi
 if [[ -n "${HELM_STATE_B64:-}" && ! -f data/runtime/state.json ]]; then
   echo "$HELM_STATE_B64" | base64 -d > data/runtime/state.json
   echo "==> seeded data/runtime/state.json from HELM_STATE_B64 (first boot)"
-# --- one-time forced reseed for a local->cloud LIVE handoff. Overwrites a stale
-#     (e.g. paper) volume state with the authoritative book exactly once. Guarded
-#     by a sentinel ON THE VOLUME so it fires once even if the flag is left set —
-#     subsequent restarts resume from the evolving live state, never the seed. ---
-elif [[ "${HELM_STATE_FORCE_RESEED:-0}" == "1" && -n "${HELM_STATE_B64:-}" && ! -f data/runtime/.state_reseeded ]]; then
-  echo "$HELM_STATE_B64" | base64 -d > data/runtime/state.json
-  : > data/runtime/.state_reseeded
-  echo "==> FORCE-reseeded data/runtime/state.json from HELM_STATE_B64 (one-time live handoff)"
+# --- forced reseed for a local->cloud handoff. Keyed to the NONCE value of
+#     HELM_STATE_FORCE_RESEED: a NEW value (any non-zero string) overwrites the
+#     volume state once and records the nonce. Set it to a fresh value whenever
+#     you reseed (e.g. a new venue / fresh capital); restarts with the SAME nonce
+#     resume from the evolving live state, never the seed. ---
+elif [[ -n "${HELM_STATE_FORCE_RESEED:-}" && "${HELM_STATE_FORCE_RESEED}" != "0" && -n "${HELM_STATE_B64:-}" ]]; then
+  _applied="$(cat data/runtime/.state_reseeded 2>/dev/null || true)"
+  if [[ "${_applied}" != "${HELM_STATE_FORCE_RESEED}" ]]; then
+    echo "$HELM_STATE_B64" | base64 -d > data/runtime/state.json
+    printf '%s' "${HELM_STATE_FORCE_RESEED}" > data/runtime/.state_reseeded
+    echo "==> FORCE-reseeded data/runtime/state.json (nonce ${HELM_STATE_FORCE_RESEED})"
+  else
+    echo "==> reseed nonce ${HELM_STATE_FORCE_RESEED} already applied; keeping live state"
+  fi
 fi
 
 # --- sanity: do not silently run unarmed (would be a no-broadcast DQ) --------
