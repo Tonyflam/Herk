@@ -539,4 +539,10 @@ def load_settings(path: str | Path | None = None) -> Settings:
             pass
     if os.getenv("HELM_FULL_MARKET") is not None:
         s.universe.full_market = _env_bool("HELM_FULL_MARKET", s.universe.full_market)
+    if os.getenv("HELM_MARK_FROM_ONCHAIN") is not None:
+        # On a CEX (ccxt) the book is NOT on-chain — disable on-chain marking
+        # (HELM_MARK_FROM_ONCHAIN=0) so the agent never tries to read a BSC
+        # wallet and mis-mark the book to an emptied (post-transfer) balance.
+        s.scoring.mark_from_onchain = _env_bool(
+            "HELM_MARK_FROM_ONCHAIN", s.scoring.mark_from_onchain)
     return s
