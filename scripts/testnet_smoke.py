@@ -140,12 +140,27 @@ def main() -> int:
         print("cannot trade: missing credentials or price. fix the FAILs above.")
         return 1
 
+    # Size up to the venue's minimum lot / notional so the smoke order clears the
+    # floor (e.g. BTC perp min is 0.001 BTC ~ $60+; a flat $12 would be rejected).
     qty = usd / px
+    try:
+        mkt = adapter._client.market(market)
+        limits = (mkt or {}).get("limits", {}) or {}
+        min_amt = float(((limits.get("amount") or {}).get("min")) or 0.0)
+        min_cost = float(((limits.get("cost") or {}).get("min")) or 0.0)
+        if min_amt > 0:
+            qty = max(qty, min_amt)
+        if min_cost > 0:
+            qty = max(qty, min_cost / px)
+    except Exception:
+        pass
+    eff_usd = qty * px
     print("-" * 64)
-    print("placing tiny TESTNET orders (open then immediately close each side)...")
+    print(f"placing tiny TESTNET orders (~${eff_usd:.2f}/leg, qty={qty:.8f}); "
+          "open then immediately close each side...")
 
-    # Long: buy to open (notional-sized), then sell reduce-only to close.
-    f_lo = adapter.execute(Order(base, "buy", ref_price=px, notional_usd=usd))
+    # Long: buy to open (sized to clear the floor), then sell reduce-only to close.
+    f_lo = adapter.execute(Order(base, "buy", ref_price=px, notional_usd=eff_usd))
     all_ok &= _show_fill("long  open  (buy)", f_lo)
     if f_lo.ok and f_lo.qty > 0:
         f_lc = adapter.execute(
