@@ -242,6 +242,21 @@ class CcxtAdapter(ExecutionAdapter):
         if order.reduce_only and self.market_type == "swap":
             params["reduceOnly"] = True
 
+        # Exchange-native SL/TP on OPEN perps (never on closes). Bybit will
+        # enforce these even if this agent goes down — a real safety net, and
+        # they show up in the Bybit UI (users kept seeing empty "no protection"
+        # positions because we only tracked stops in-memory). reduce_only orders
+        # skip attachment (they are the close itself).
+        if (not order.reduce_only) and self.market_type == "swap":
+            if order.stop_price and order.stop_price > 0:
+                params["stopLoss"] = self._client.price_to_precision(
+                    market, order.stop_price
+                ) if hasattr(self._client, "price_to_precision") else order.stop_price
+            if order.take_profit_price and order.take_profit_price > 0:
+                params["takeProfit"] = self._client.price_to_precision(
+                    market, order.take_profit_price
+                ) if hasattr(self._client, "price_to_precision") else order.take_profit_price
+
         try:
             res = self._client.create_order(
                 market, "market", order.side, amount, params=params

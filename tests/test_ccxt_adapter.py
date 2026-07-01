@@ -37,7 +37,7 @@ class FakeExchange:
     def create_order(self, symbol, type_, side, amount, params=None):
         if self.raise_on_order is not None:
             raise self.raise_on_order
-        self.orders.append((symbol, type_, side, amount))
+        self.orders.append((symbol, type_, side, amount, params or {}))
         notional = amount * self.fill_price
         return {
             "average": self.fill_price,
@@ -156,3 +156,44 @@ def test_secret_is_scrubbed_from_error_note():
 def test_supports_live_true():
     a = CcxtAdapter(_settings(), client=FakeExchange())
     assert a.supports_live() is True
+
+
+# --------------------------------------------------------------------------- #
+# Exchange-native SL/TP on perp opens (visible in Bybit UI, enforced by venue) #
+# --------------------------------------------------------------------------- #
+def test_perp_open_attaches_stop_and_take_profit_params():
+    fake = FakeExchange(fill_price=100.0)
+    a = CcxtAdapter(_settings(market_type="swap", leverage=True, max_lev=3.0), client=fake)
+    fill = a.execute(Order("INJ", "buy", ref_price=100.0, notional_usd=100.0,
+                           stop_price=95.0, take_profit_price=115.0))
+    assert fill.ok
+    _sym, _type, _side, _amt, params = fake.orders[0]
+    assert float(params["stopLoss"]) == pytest.approx(95.0)
+    assert float(params["takeProfit"]) == pytest.approx(115.0)
+
+
+def test_perp_reduce_only_close_never_attaches_stop_or_tp():
+    fake = FakeExchange(fill_price=100.0)
+    a = CcxtAdapter(_settings(market_type="swap", leverage=True, max_lev=3.0), client=fake)
+    # A reduce-only close (e.g. flatten) must NOT carry stopLoss/takeProfit —
+    # those belong on the OPEN. Attaching them to a close would be rejected by
+    # Bybit or, worse, create a phantom TPSL on top of a flat book.
+    fill = a.execute(Order("INJ", "sell", ref_price=100.0, qty=1.0,
+                           reduce_only=True,
+                           stop_price=95.0, take_profit_price=115.0))
+    assert fill.ok
+    _sym, _type, _side, _amt, params = fake.orders[0]
+    assert "stopLoss" not in params
+    assert "takeProfit" not in params
+    assert params.get("reduceOnly") is True
+
+
+def test_spot_open_never_attaches_stop_or_tp():
+    fake = FakeExchange(fill_price=100.0)
+    a = CcxtAdapter(_settings(market_type="spot"), client=fake)
+    # Spot markets have no reduceOnly and no perps TPSL — never attach.
+    a.execute(Order("AAVE", "buy", ref_price=100.0, notional_usd=100.0,
+                    stop_price=95.0, take_profit_price=115.0))
+    _sym, _type, _side, _amt, params = fake.orders[0]
+    assert "stopLoss" not in params
+    assert "takeProfit" not in params

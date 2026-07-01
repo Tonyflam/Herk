@@ -42,6 +42,8 @@ class Order:
     reason: str = ""
     reduce_only: bool = False  # perps: True = close/reduce only (never opens a new position)
     leverage: float = 0.0      # perps: per-trade leverage cap (0 = use adapter default/ceiling)
+    stop_price: float = 0.0    # perps: attach an exchange-native stop-loss trigger on OPEN
+    take_profit_price: float = 0.0  # perps: attach an exchange-native take-profit trigger on OPEN
 
 
 @dataclass

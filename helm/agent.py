@@ -748,8 +748,15 @@ class Agent:
         exec_price = ref
         if self._x402_ready():
             exec_price = self._x402_prebuy(sym, ref, now)
+        # Precompute stop/TP so we can attach them to the exchange order too,
+        # not just track them in the portfolio book. Bybit enforces the levels
+        # even if this agent dies.
+        _stop_dist = atr * s.risk.stop_loss_atr_mult if atr > 0 else exec_price * 0.06
+        _stop_pre = max(0.0, exec_price - _stop_dist)
+        _tp_pre = exec_price + (atr * s.risk.take_profit_atr_mult if atr > 0 else exec_price * 0.10)
         order = Order(sym, "buy", ref_price=exec_price, notional_usd=notional,
-                      liquidity_usd=1e9, reason=reason)
+                      liquidity_usd=1e9, reason=reason,
+                      stop_price=_stop_pre, take_profit_price=_tp_pre)
         fill = self.executor.execute(order)
         if not fill.ok or fill.notional_usd <= 0 or fill.qty <= 0:
             # Stay armed and retry next cycle rather than book a phantom buy.
@@ -1304,7 +1311,9 @@ class Agent:
             order = Order(sig.symbol, "buy", ref_price=exec_price,
                           notional_usd=plan.notional_usd, liquidity_usd=sig.liquidity_usd,
                           reason="entry",
-                          leverage=self._safe_leverage(exec_price, plan.stop_distance))
+                          leverage=self._safe_leverage(exec_price, plan.stop_distance),
+                          stop_price=plan.stop_price,
+                          take_profit_price=plan.take_profit_price)
             fill = self.executor.execute(order)
             if not fill.ok or fill.notional_usd <= 0 or fill.qty <= 0:
                 # A failed/empty live swap must NOT book a phantom position or a
@@ -1400,7 +1409,9 @@ class Agent:
             order = Order(sig.symbol, "sell", ref_price=sig.price, qty=qty,
                           notional_usd=plan.notional_usd, liquidity_usd=sig.liquidity_usd,
                           reason="short_entry", reduce_only=False,
-                          leverage=self._safe_leverage(sig.price, plan.stop_distance))
+                          leverage=self._safe_leverage(sig.price, plan.stop_distance),
+                          stop_price=plan.stop_price,
+                          take_profit_price=plan.take_profit_price)
             fill = self.executor.execute(order)
             if not fill.ok or fill.qty <= 0:
                 self.ledger.append("alert", {"reason": "short_entry_unfilled",
